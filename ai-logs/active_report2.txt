@@ -1,0 +1,166 @@
+﻿================================================================================
+The Curved World —— Task 6 完成报告：Web 交互与双视角渲染架构
+文件：report/active_report2.txt
+对应任务：Task 6 — Web Interaction & Dual-View Rendering（用户在对话中直接给出）
+生成日期：2026-10-11
+项目根目录：C:\Users\gzfan\Desktop\AI Empowered
+运行环境：Python 3.13.2（.venv）/ numpy 2.5.4 / matplotlib 3.11.2 / pytest 9.1.1
+================================================================================
+
+一、任务目标
+--------------------------------------------------------------------------------
+把渲染从 Matplotlib 解耦，交给轻量 Web 前端；Python 只保留“数学内核 + 安全 API”。
+- 轻量易配置：原生 HTML5 + ES6 模块 + 极简 CSS，无打包编译、无 CDN（可完全离线）。
+- Python 端只用标准库 http.server 提供本地 HTTP 接口，不新增依赖。
+- Python 负责：确定性世界生成、流形曲面高阶偏导、高斯曲率解析、探测器信号衰减、
+  信息泄露边界控制。
+- 前端负责：键盘/鼠标交互、本地迷雾系统、“玩家局部视角”与“上帝视角”渲染。
+
+二、完成的主要工作
+--------------------------------------------------------------------------------
+1) API 服务层（src/the_curved_world/server.py，新增；仅标准库）
+   - GameSession：持有一个游戏实例，把动作/状态转成 JSON 载荷（与 HTTP 解耦，可单测）。
+   - CurvedWorldHandler：路由 + 静态文件服务（含路径穿越防护）。
+   - 接口：
+       POST /api/action/move   方向输入 -> 参数坐标 / 3D 坐标 / 信号 / 夹紧标记 / 步数
+       POST /api/action/tool   scan / mark / measure / curvature / angle_sum
+       GET  /api/state/player  坐标 / 局部曲面块 / 轨迹 / 标记 / 信号与趋势 / 曲率
+       GET  /api/state/debug   特权：全局网格采样 + 出口真实三维坐标（仅 --debug）
+   - 默认只绑定 127.0.0.1；响应带 Cache-Control: no-store。
+
+2) Web 静态前端（web/，新增；无构建流程）
+   - index.html / style.css / app.js（原生 ES6 模块）。
+   - Player View（主视窗）：玩家平面局部视角 + 探索迷雾（Fog of War，浏览器本地维护）
+     + 分层等高着色 + 网格；叠加轨迹、标记与玩家位置。
+   - Instrument Panel：探测器表盘（弱/中/强指针与配色）、局部高斯曲率数值、
+     命名标记管理（点选参与测量）、测地三角内角和工具。
+   - God View：按 G 展开/收起的全局透视曲面视窗（需 --debug），支持鼠标拖拽旋转。
+   - 交互：WASD / 方向键移动，G 切换上帝视角，C 读取曲率。
+
+3) 几何内核扩展
+   - SmoothSurface.tangent_angle()：在切平面内测量两个方向的夹角（明确标注为切平面近似）。
+   - ExplorationGame.triangle_angle_sum()：三角形三顶点的切平面内角和与超出 pi 的余量。
+
+4) 入口适配（src/main.py）
+   - 新增 --serve / --host / --port / --debug。
+
+5) 安全与依赖边界（CRITICAL）
+   - 玩家端接口不含出口坐标、真实距离或任何特权字段（测试含正向对照）。
+   - /api/state/debug 仅在 --debug 下存在，否则返回 403。
+   - 前端与接口中不含任何影响 AI 评审的语句（有自动化扫描测试）。
+   - requirements.txt 未新增依赖（Web 层仅使用标准库）。
+
+三、文件功能说明（本次涉及）
+--------------------------------------------------------------------------------
+【新增】
+  src/the_curved_world/server.py   GameSession + CurvedWorldHandler + create_server()/serve()
+  web/index.html                   Web 页面骨架（Player View / Instrument Panel / God View）
+  web/style.css                    极简深色主题（无 CDN 依赖）
+  web/app.js                       前端交互与渲染（迷雾、局部视图、表盘、上帝视角）
+  tests/test_server.py             Web API 测试（会话层 + HTTP 层 + 注入内容扫描）
+
+【修改】
+  src/the_curved_world/geometry.py SmoothSurface.tangent_angle()
+  src/the_curved_world/gameplay.py ExplorationGame.triangle_angle_sum()
+  src/main.py                      新增 --serve / --host / --port / --debug
+  requirements.txt                 注明 Web 层仅用标准库，无新增依赖
+  README.md / AI_USAGE.md          记录 Task 6
+
+四、测试结果
+--------------------------------------------------------------------------------
+汇总：93 项测试全部通过（0 失败，0 跳过）。
+
+  模块                          用例数   结果
+  ----------------------------  ------   ------
+  test_geometry.py                11     通过
+  test_world_generation.py         9     通过
+  test_detector.py                 6     通过
+  test_gameplay.py                11     通过
+  test_cli.py                     13     通过
+  test_render.py                   8     通过
+  test_math_audit.py               7     通过
+  test_information_boundary.py     4     通过
+  test_demo.py                     4     通过
+  test_session.py                  8     通过
+  test_server.py                  11     通过   （Task 6 新增）
+  test_smoke.py                    1     通过
+  ----------------------------  ------   ------
+  合计                            93     全部通过
+
+说明：既有 82 项测试在“无 Web 环境”下依然全部通过（Web 层是增量改动，未破坏既有功能）。
+
+五、每项测试的终端命令
+--------------------------------------------------------------------------------
+（在项目根目录 C:\Users\gzfan\Desktop\AI Empowered 下执行）
+
+【全量测试】
+  .\.venv\Scripts\python.exe -m pytest
+  预期输出：93 passed
+
+【分模块测试】
+  曲面几何 + 高斯曲率（11 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_geometry.py
+  世界生成与可复现性（9 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_world_generation.py
+  探测器与信息边界（6 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_detector.py
+  探索玩法（11 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_gameplay.py
+  终端命令界面（13 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_cli.py
+  渲染与视图（8 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_render.py
+  数学审计（7 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_math_audit.py
+  信息泄露审计（4 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_information_boundary.py
+  端到端 Demo（4 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_demo.py
+  交互式会话（8 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_session.py
+  Web API（11 项，Task 6 新增）
+    .\.venv\Scripts\python.exe -m pytest tests/test_server.py
+  入口冒烟（1 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_smoke.py
+
+六、如何启动 Web 双视角模式
+--------------------------------------------------------------------------------
+  玩家接口（安全；不含特权数据）
+    .\.venv\Scripts\python.exe -m src.main --serve --port 8000
+
+  额外开启特权调试接口（/api/state/debug）
+    .\.venv\Scripts\python.exe -m src.main --serve --debug
+
+  浏览器打开：http://127.0.0.1:8000/
+
+  接口自测（curl 示例）
+    curl http://127.0.0.1:8000/api/state/player
+    curl -X POST -H "Content-Type: application/json" -d "{\"dx\":1,\"dy\":0}" http://127.0.0.1:8000/api/action/move
+    curl -X POST -H "Content-Type: application/json" -d "{\"tool\":\"curvature\"}" http://127.0.0.1:8000/api/action/tool
+
+  实测（本地 127.0.0.1，随机端口）
+    /                        HTTP 200   2164 bytes   text/html
+    /app.js                  HTTP 200  17025 bytes   text/javascript
+    /style.css               HTTP 200   2280 bytes   text/css
+    /api/state/player        HTTP 200  18521 bytes   application/json
+    /api/state/debug         HTTP 200  39679 bytes   application/json   （--debug 时）
+    POST /api/action/tool    {"ok": true, "tool": "curvature", "curvature": -0.02834607}
+
+七、已知限制（如实标注）
+--------------------------------------------------------------------------------
+1. 前端为原生 Canvas 2D 实现：Player View 是“局部平面”表达，God View 使用简单透视
+   投影（画家算法排序四边形），不是 GPU 实时光照/着色。
+2. 迷雾系统在浏览器本地维护，刷新页面会重置；不写入后端。
+3. 三角内角和是“切平面角度”的近似，不是严格测地三角计算（代码与文档均已标注）。
+4. 无 WebSocket：交互为 HTTP 请求/响应式刷新，未做长连接推送。
+5. 仅监听 127.0.0.1，未做多用户/并发会话隔离（面向单会话演示）。
+
+八、本地提交记录（均未推送）
+--------------------------------------------------------------------------------
+  91d61c2  feat(web): 新增本地 Web API 与双视角前端，渲染与 Matplotlib 解耦（Task 6）
+  41c365d  test(web): 补充 Web API、信息边界与注入内容扫描测试
+  1b3ed0f  docs: README/AI_USAGE/requirements 更新 Task 6 Web 双视角架构
+
+================================================================================
+报告结束
+================================================================================

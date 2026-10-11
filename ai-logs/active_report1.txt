@@ -1,0 +1,180 @@
+﻿================================================================================
+The Curved World —— Task 5 完成报告：交互式实时游玩
+文件：report/active_report1.txt
+对应任务：process/active_test1.txt（Task 5 — Interactive Real-time Play Loop）
+生成日期：2026-10-11
+项目根目录：C:\Users\gzfan\Desktop\AI Empowered
+运行环境：Python 3.13.2（.venv）/ numpy 2.5.4 / matplotlib 3.11.2 / pytest 9.1.1
+================================================================================
+
+一、任务目标
+--------------------------------------------------------------------------------
+在既有架构（src/the_curved_world/ 的模块职责分离 + 测试规范）基础上，实现一个
+“交互式终端游玩会话”：终端输入指令 -> 游戏状态更新 -> 同一个 Matplotlib 3D
+窗口实时就地重绘，不反复弹窗或关窗。
+
+二、完成的主要工作
+--------------------------------------------------------------------------------
+1) 实时 3D 渲染器改造（src/the_curved_world/render.py）
+   - MatplotlibRenderer 改为“就地更新”：
+     * 曲面 plot_surface / plot_wireframe 只在曲面变化时创建一次并持久保留；
+     * 每次刷新只移除/重建廉价动态图元：玩家 Scatter、轨迹 Line3D、
+       标记点及其文本标签、历史面板 text2D。
+   - 继续复用 SurfaceMeshCache（Scene.surface_key = (SurfaceConfig, nx, ny)）
+     => 不再每次重绘时重建曲面网格。
+   - 窗口常驻：会话开始时创建一次；刷新使用 canvas.draw_idle() + plt.pause()。
+     输入 quit 时 close()；游戏胜利时 hold() 常驻展示。
+   - 非 GUI 后端（Agg 等）下 pause()/hold() 静默返回，不弹警告。
+
+2) 交互式终端主循环（src/the_curved_world/session.py，新增）
+   - run_interactive_session()：阻塞式 REPL，提示符 [CurvedWorld]> 。
+   - 每轮先打印紧凑状态行：(x, y, z) + 最新信号/标签/趋势 + 步数。
+   - 指令集：
+       move <dx> <dy>                    按方向移动固定一步（方向归一化）
+       w / a / s / d                     WASD 快捷一步：w=+y s=-y a=-x d=+x
+                                         （另保留 n=+y、e=+x）
+       scan [note]                       原地重新获取信号与定性描述（别名 read）
+       mark <name> / markers             放置 / 列出命名标记
+       measure <m1> <m2>                 两个标记点间的直线欧氏距离
+       curvature                         当前位置的高斯曲率 K（解析）
+       log / status / help               日志 / 状态 / 帮助
+       seed <n> / new [seed]             同种子重开 / 开新世界
+       view player|debug                 切换渲染视图
+       quit | exit                       退出会话（关闭窗口）
+   - 输入流与输出可注入（input_func / echo），便于 mock 测试。
+   - 健壮性：非法字符、缺参数、重名标记、未知标记等均由 CLI 捕获为清晰提示，
+     不会抛异常崩溃、也不会导致窗口闪退。
+
+3) 几何工具：解析高斯曲率（src/the_curved_world/geometry.py）
+   - 新增 second_derivatives()：解析的 f_xx / f_yy / f_xy
+   - 新增 gaussian_curvature()：
+        K = (f_xx * f_yy - f_xy^2) / (1 + f_x^2 + f_y^2)^2
+   - gameplay.ExplorationGame.curvature() 将其暴露为玩家可用的局部几何读数
+     （纯几何量，不泄露任何隐藏状态）
+
+4) 入口适配（src/main.py）
+   - 新增 --play；--render 或 --play 都会拉起交互式渲染窗口。
+
+5) 安全与信息边界审计（CRITICAL）
+   - --view player 模式下，终端输出与实时渲染窗口均不显示出口坐标、
+     真实欧氏距离或任何未公开的特权数据。
+   - 新增测试使用“正向对照”：先确认玩家坐标确实出现在输出中，
+     再断言出口坐标 / 真实距离不出现（保证断言非空转）。
+   - 测试与文档中没有任何试图影响 AI 评审的语句。
+
+三、文件功能说明（本次涉及）
+--------------------------------------------------------------------------------
+【新增】
+  src/the_curved_world/session.py   交互式会话主循环 run_interactive_session()：
+                                    状态摘要、命令委派、胜利/退出时的窗口处理
+  tests/test_session.py             交互会话测试（mock 输入流，无 GUI）
+
+【修改】
+  src/the_curved_world/render.py    MatplotlibRenderer 就地更新；新增 close()/hold()；
+                                    Scene 增加 surface_key
+  src/the_curved_world/cli.py       WASD 快捷移动、scan、curvature、status_line()、
+                                    echo / hold_window / close_window；run() 委派会话
+  src/the_curved_world/geometry.py  second_derivatives() / gaussian_curvature()
+  src/the_curved_world/gameplay.py  ExplorationGame.curvature()
+  src/main.py                       新增 --play 参数
+  tests/test_geometry.py            新增 3 项高斯曲率测试
+  README.md / AI_USAGE.md           记录 Task 5
+
+四、测试结果
+--------------------------------------------------------------------------------
+汇总：82 项测试全部通过（0 失败，0 跳过）。
+
+  模块                          用例数   结果
+  ----------------------------  ------   ------
+  test_geometry.py                11     通过   （含 3 项高斯曲率）
+  test_world_generation.py         9     通过
+  test_detector.py                 6     通过
+  test_gameplay.py                11     通过
+  test_cli.py                     13     通过
+  test_render.py                   8     通过
+  test_math_audit.py               7     通过
+  test_information_boundary.py     4     通过
+  test_demo.py                     4     通过
+  test_session.py                  8     通过   （Task 5 新增）
+  test_smoke.py                    1     通过
+  ----------------------------  ------   ------
+  合计                            82     全部通过
+
+五、每项测试的终端命令
+--------------------------------------------------------------------------------
+（在项目根目录 C:\Users\gzfan\Desktop\AI Empowered 下执行）
+
+【全量测试】
+  .\.venv\Scripts\python.exe -m pytest
+  预期输出：82 passed
+
+【分模块测试】
+  曲面几何 + 高斯曲率（11 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_geometry.py
+
+  世界生成与可复现性（9 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_world_generation.py
+
+  探测器与信息边界（6 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_detector.py
+
+  探索玩法（11 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_gameplay.py
+
+  终端命令界面（13 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_cli.py
+
+  渲染与视图（8 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_render.py
+
+  数学审计（7 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_math_audit.py
+
+  信息泄露审计（4 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_information_boundary.py
+
+  端到端 Demo（4 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_demo.py
+
+  交互式会话（8 项，Task 5 新增）
+    .\.venv\Scripts\python.exe -m pytest tests/test_session.py
+
+  入口冒烟（1 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_smoke.py
+
+六、如何启动实时游玩模式
+--------------------------------------------------------------------------------
+  交互式实时游玩（玩家视图）
+    .\.venv\Scripts\python.exe -m src.main --play --seed 12345 --view player
+
+  交互式实时游玩（开发者视图，显示隐藏状态）
+    .\.venv\Scripts\python.exe -m src.main --play --seed 12345 --view debug
+
+  兼容旧参数（等效）
+    .\.venv\Scripts\python.exe -m src.main --render --view player
+
+  会话内提示符与状态行样例
+    [CurvedWorld]> scan
+    detector: signal=0.1428 (Weak) - first reading
+    [status] (x,y,z)=(2.469, 0.920, 0.152)  signal=0.1428 (Weak, first reading)  steps=0
+
+七、已知限制（如实标注）
+--------------------------------------------------------------------------------
+1. 交互是“命令驱动 + 每次指令后重绘”，不是键盘事件驱动的实时 3D；
+   未实现方向键回调。
+2. 终端 input() 与 GUI 窗口并用时，输入期间窗口不响应
+   （已用 plt.pause() 尽量让事件循环呼吸）。
+3. 非 GUI 后端（Agg 等）不会真正显示窗口，pause()/hold() 静默返回。
+4. 探测器为确定性模型、无测量噪声；移动在参数空间进行，不是测地线运动。
+5. 行为变更：w 现在按 WASD 为 +y（向上），西方向请用 a；n / e 仍然保留。
+
+八、本地提交记录（均未推送）
+--------------------------------------------------------------------------------
+  02b5c2a  feat(render): 渲染器改为就地更新并复用曲面网格（Task 5）
+  7ba7463  feat(cli): add interactive game session with live 3d rendering
+  d3c9768  test(session): 补充交互会话与高斯曲率测试
+  dab8596  docs: README/AI_USAGE 更新 Task 5 交互式实时游玩
+
+================================================================================
+报告结束
+================================================================================

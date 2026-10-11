@@ -1,0 +1,198 @@
+﻿================================================================================
+The Curved World —— Task 8 完成报告：封闭紧致三维流形系统
+文件：report/topology_report1.txt
+对应任务：process/topology1.txt（Task 8 — Closed 2D Manifolds Embedded in R^3）
+生成日期：2026-10-11
+项目根目录：C:\Users\gzfan\Desktop\AI Empowered
+运行环境：Python 3.13.2（.venv）/ numpy 2.5.4 / matplotlib 3.11.2 / pytest 9.1.1
+================================================================================
+
+一、任务目标
+--------------------------------------------------------------------------------
+把“有界平面高度图曲面”重构为“紧致正则的三维封闭流形系统”：
+1) 三套可调参的正则封闭曲面模型（亏格 1 环面 / 亏格 0 椭球 / 双孔近似）；
+2) 解析一阶、二阶偏导，第一/第二基本形式与高斯曲率 K；
+3) 取消边界钳制，改为周期坐标环绕，支持无界行走；
+4) 探测器仍用环境三维欧氏距离，体现“隔面近在咫尺、行走需绕大圈”；
+5) Web 前端同步：周期迷雾、环绕足迹、封闭三维上帝视角；
+6) 原有 API 测试与信息边界测试在新曲面下 100% 通过。
+
+二、完成的主要工作
+--------------------------------------------------------------------------------
+1) 封闭流形引擎（src/the_curved_world/manifold.py，新增）
+   - 抽象基类 ClosedManifold：统一参数域 (u, v) in [-pi, pi) x [-pi, pi)。
+     基类派生法向 n、第一基本形式 E/F/G、第二基本形式 L/M/N、
+     K = (L N - M^2)/(E G - F^2)、面积元 sqrt(E G - F^2)、切线夹角、
+     采样网格、数值面积与曲率积分。全部解析，不使用运行时数值差分。
+   - 模型 A：DeformedTorus（默认，亏格 1）
+       r(u,v) = ((R + rho cos u) cos v, (R + rho cos u) sin v, rho sin u)
+       rho(u,v) = r0 + sum A_k cos(k u + phi_k) + sum B_l sin(l v + psi_l)
+       构造时校验 R > max|rho| > 0 且 E G - F^2 > 0（处处正则）。
+   - 模型 B：DeformedEllipsoid（亏格 0）
+       r(u,v) = (a m(v) sin v cos u, b m(v) sin v sin u, c m(v) cos v)
+       仅允许径向（axis='v'）调制，以保住两极的退化结构。
+   - 模型 C：GenusTwoApproximation（双孔外观近似）
+       环半径调制 R(u) = R0 + R1 cos(2u) + 管半径谐波，E G - F^2 > 0 处处成立。
+   - 周期环绕：wrap_parameter(x) = ((x + pi) mod 2pi) - pi。
+
+2) 玩法与世界生成适配（world.py / gameplay.py / config.py）
+   - default_config() 的默认曲面改为 DeformedTorus；
+     min_separation=12、boundary_margin=0、detector_scale=12（三维环境距离）。
+   - 移动改为周期环绕：周期曲面上不再钳制、也不再报告 clamped；
+     平面图曲面（保留）仍走原有钳制路径。
+   - 出口为流形上的随机参数点；探测器保持环境三维欧氏距离。
+   - 标记存于周期参数空间；measure 仍为两点三维直线距离；
+     测角仪与高斯-博内仍在局部切空间成立。
+
+3) Web 与双视角同步（server.py / web/app.js / web/style.css）
+   - /api/state/player：补丁以玩家为中心（半径 = 0.22 x 参数域跨度），
+     附带 E/F/G；z 取嵌入坐标第三分量（图曲面=高度，流形=三维 z）；
+     新增 periodic 标志。
+   - /api/state/debug：返回**三维坐标网格** X/Y/Z 与通用模型描述，可渲染封闭三维网格。
+   - 前端：迷雾升级为**环面周期位图**（索引前先 wrap，跨接缝不撕裂）；
+     历史足迹与标记按 universal cover 展开（unwrapNear），跨界无跳变；
+     上帝视角改为渲染封闭三维网格（四边形画家算法 + 深度排序）。
+
+4) 验证
+   - 解析 vs 数值偏导：一阶最大误差 < 1e-6；二阶（h=1e-4）最大误差 < 1e-3。
+   - 正则性：环面与双孔近似 min(E G - F^2) > 0、退化占比 0；
+     椭球仅在两极退化（退化占比约 2.2%，为拓扑必然）。
+   - 高斯-博内（iint K dA）：环面 0.0000（理论 0）、
+     椭球 24.53（双覆盖理论 8 pi = 25.13，极点退化导致约 2.4% 数值偏差）、
+     双孔近似约 0.08（理论 0）。
+   - 连续行走 400 步：坐标始终落在 [-pi, pi)，clamped 恒为 False。
+   - 端到端：种子 12345 的可复现 Demo 在封闭环面上 18 步 / 11 次读数 / 2 个标记 获胜；
+     Web 实测三角形内角和 272.3 度、iint K dA = 2.33（同为正曲率隆起），指向器正常。
+
+三、文件功能说明（本次涉及）
+--------------------------------------------------------------------------------
+【新增】
+  src/the_curved_world/manifold.py  ClosedManifold 基类 + DeformedTorus /
+                                    DeformedEllipsoid / GenusTwoApproximation +
+                                    RadialHarmonic + 周期环绕与解析微分几何
+  tests/test_closed_manifold.py     三模型解析偏导、正则性、周期环绕、
+                                    高斯-博内积分、世界/API 集成与信息边界（16 项）
+
+【修改】
+  src/the_curved_world/config.py    允许 WorldConfig.surface 为封闭流形；
+                                    default_config() 改为默认环面世界
+  src/the_curved_world/world.py     流形直接作为曲面（不做图曲面抖动）
+  src/the_curved_world/gameplay.py  周期曲面走环绕而非钳制；步长对齐流形尺度
+  src/the_curved_world/geometry.py  SmoothSurface 增加 cache_key / periodic 标记
+  src/the_curved_world/render.py    网格缓存键改用 cache_key；调试面板兼容流形
+  src/the_curved_world/server.py    补丁自适应半径 + E/F/G；调试接口返回三维网格；
+                                    玩家状态增加 periodic
+  web/app.js                        周期迷雾、环绕足迹、封闭三维上帝视角
+  web/index.html / style.css        文案与提示同步
+  tests/test_gameplay.py / test_large_scale.py / test_math_audit.py /
+  tests/test_render.py / test_server.py   适配“默认世界为封闭流形”
+  README.md / AI_USAGE.md           记录 Task 8
+
+四、测试结果
+--------------------------------------------------------------------------------
+汇总：119 项测试全部通过（0 失败，0 跳过）。
+
+  模块                          用例数   结果
+  ----------------------------  ------   ------
+  test_geometry.py                11     通过
+  test_world_generation.py         9     通过
+  test_detector.py                 6     通过
+  test_gameplay.py                11     通过
+  test_cli.py                     13     通过
+  test_render.py                   8     通过
+  test_math_audit.py               7     通过
+  test_information_boundary.py     4     通过
+  test_demo.py                     4     通过
+  test_session.py                  8     通过
+  test_server.py                  11     通过
+  test_large_scale.py             10     通过
+  test_closed_manifold.py         16     通过   （Task 8 新增）
+  test_smoke.py                    1     通过
+  ----------------------------  ------   ------
+  合计                           119     全部通过
+
+五、每项测试的终端命令
+--------------------------------------------------------------------------------
+（在项目根目录 C:\Users\gzfan\Desktop\AI Empowered 下执行）
+
+【全量测试】
+  .\.venv\Scripts\python.exe -m pytest
+  预期输出：119 passed
+
+【分模块测试】
+  曲面几何与高斯曲率（11 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_geometry.py
+  世界生成与可复现性（9 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_world_generation.py
+  探测器与信息边界（6 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_detector.py
+  探索玩法（11 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_gameplay.py
+  终端命令界面（13 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_cli.py
+  渲染与视图（8 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_render.py
+  数学审计（7 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_math_audit.py
+  信息泄露审计（4 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_information_boundary.py
+  端到端 Demo（4 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_demo.py
+  交互式会话（8 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_session.py
+  Web API（11 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_server.py
+  大尺度图曲面与工具链（10 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_large_scale.py
+  封闭紧致流形（16 项，Task 8 新增）
+    .\.venv\Scripts\python.exe -m pytest tests/test_closed_manifold.py
+  入口冒烟（1 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_smoke.py
+
+六、如何启动与自测
+--------------------------------------------------------------------------------
+  Web 双视角（封闭流形；玩家接口安全）
+    .\.venv\Scripts\python.exe -m src.main --serve --port 8000
+    浏览器打开 http://127.0.0.1:8000/
+
+  Web + 特权调试接口（封闭三维上帝视角）
+    .\.venv\Scripts\python.exe -m src.main --serve --debug
+
+  终端实时游玩 / 可复现 Demo
+    .\.venv\Scripts\python.exe -m src.main --play --seed 12345 --view player
+    .\.venv\Scripts\python.exe -m src.main --demo-scenario
+
+  接口自测（curl 示例）
+    curl http://127.0.0.1:8000/api/state/player
+    curl -X POST -H "Content-Type: application/json" -d "{\"dx\":1,\"dy\":0,\"steps\":5}" http://127.0.0.1:8000/api/action/move
+    curl http://127.0.0.1:8000/api/state/debug
+
+  本轮实测样本
+    玩家状态：periodic=True，uv=[-1.713, -1.151]，补丁 33x33，K=3e-05
+    move steps=5 -> [-0.463198, -1.151341]
+    triangle：内角和 272.289 度，iint K dA = 2.3286，positive curvature (bulge)
+    pointer：方位角 -45.0 度
+    debug：model=deformed torus (genus 1)，mesh 61 x 61 三维网格
+
+七、已知限制（如实标注，含拓扑必然性）
+--------------------------------------------------------------------------------
+1. 用 [-pi, pi)^2 做**正则**参数化，其像必然是亏格 1。因此：
+   - 环面与双孔近似模型处处正则；
+   - 亏格 0 的椭球**必然**存在 2 个参数退化点（两极），K 公式使用分母下限避免除零；
+   - 真正的亏格 2 需要亏格 2 的参数域，模型 C 只是“双孔外观近似”，非真亏格 2。
+2. 椭球的曲率积分因极点退化有约 2.4% 数值偏差（24.53 vs 25.13）。
+3. 曲率面积分与总面积为**数值**积分（周期性中点法），非解析积分。
+4. 前端玩家视图是 Canvas 2D 的局部平面表达，网格畸变是视觉提示，不是等距嵌入。
+5. 迷雾在浏览器本地维护，刷新页面重置。
+6. 指向器是有限次、量化的方向提示，仍不返回出口坐标与精确距离。
+
+八、本地提交记录（均未推送）
+--------------------------------------------------------------------------------
+  0c3066b  feat(manifold): 新增封闭紧致流形引擎与三套可调参模型（Task 8）
+  135131c  feat(world): 默认世界改为封闭环面并启用周期环绕（Task 8）
+  bad9671  test(manifold): 补充封闭流形解析偏导、正则性、周期环绕与高斯-博内测试
+  4a1d90c  docs: README/AI_USAGE 更新 Task 8 封闭紧致流形
+
+================================================================================
+报告结束
+================================================================================

@@ -1,0 +1,200 @@
+﻿================================================================================
+The Curved World —— Task 9 完成报告：地图工厂插件化与 Web 启动大厅
+文件：report/plugin_report1.txt
+对应任务：process/Plug-in1.txt（Task 9 — Map Registry & Launcher Dashboard）
+生成日期：2026-10-11
+项目根目录：C:\Users\gzfan\Desktop\AI Empowered
+运行环境：Python 3.13.2（.venv）/ numpy 2.5.4 / matplotlib 3.11.2 / pytest 9.1.1
+================================================================================
+（说明：本报告为追加记录，之前的 active_report1~3 / topology_report1 / test_report 均保留。）
+
+一、任务目标
+--------------------------------------------------------------------------------
+1) 把现有零散曲面与流形统一封装为“地图注册表 / 工厂”插件模式；
+   外部扩展新地图只需写一个类 + 装饰器，无需改动世界生成器或服务端主逻辑。
+2) 提供 Web 启动大厅：地图选择（含数学简介）、游玩模式（玩家探索 / 全知观测）、
+   随机种子配置；进入后平滑过渡，游戏内可随时唤回大厅换图。
+3) 补充测试并把全量 pytest 保持全绿。
+
+二、完成的主要工作
+--------------------------------------------------------------------------------
+1) 地图注册表（src/the_curved_world/maps.py，新增）
+   - MapMetadata：id / name / description / topology / factory / placement，
+     并提供 JSON 安全的 to_dict()（工厂函数不外泄）。
+   - MapRegistry（单例）：register / get / unregister / ids / list_maps / create；
+     未注册 id 抛 MapNotFound（清晰列出可用 id）。
+   - @register_map 装饰器：装饰类（需实现 build(self, params)）或直接装饰工厂函数；
+     注册时校验 id 非空、topology 合法、factory 可调用。
+   - 内置 4 张地图（自动注册）：
+       torus_genus1      变形环面（亏格 1）      closed_periodic
+       ellipsoid_genus0  波动椭球（亏格 0）      closed_periodic
+       double_torus      双孔近似（亏格 2 外观）  closed_periodic
+       planar_landscape  经典平面图曲面          bounded_plane
+   - world_config_for(map_id)：按地图元数据的 placement 生成 WorldConfig；
+   - map_id_for(config)：反向查询地图 id（未注册返回 "custom"）。
+
+2) 服务端适配（src/the_curved_world/server.py）
+   - GameSession 新增 map_id / mode / startup_debug；
+     mode = "player" | "god"（--debug 启动时默认 god）。
+   - 新增 reset_world(map_id, seed, mode)：按地图重建世界、探测器与玩家位置；
+     新增 summary() 返回 {map_id, mode, seed, periodic}。
+   - 新增 GET /api/maps：返回全部地图元数据 + 默认 id。
+   - 新增 POST /api/session/new：{map_id, seed, mode} -> 会话重置。
+   - 安全门禁：mode == "player" 时 /api/state/debug **一律** 403，
+     无论客户端发什么请求；只有全知模式或以 --debug 启动才放行。
+   - 玩家状态新增 map_id / mode / periodic（均非特权信息）。
+
+3) 入口与命令行切图（src/main.py、demo.py）
+   - 新增 --map {torus_genus1, ellipsoid_genus0, double_torus, planar_landscape}。
+   - --play / --serve / --demo / --demo-scenario 全部支持 --map；
+     serve() 支持 map_id / world_config 参数。
+   - Demo 起始行会打印所用地图名。
+
+4) Web 启动大厅（web/index.html、web/style.css、web/app.js）
+   - 毛玻璃大厅 #lobby-modal：默认开启，居中弹出，带淡出过渡。
+   - 地图下拉框由 GET /api/maps 动态填充，切换时显示该地图的数学简介。
+   - 游玩模式单选：玩家探索 / 全知上帝视角；种子输入框（留空随机）。
+   - 「进入学院」-> POST /api/session/new -> 清空本地迷雾/选择/指向器 -> 刷新并淡出大厅；
+     全知模式自动展开三维全局网格并高亮出口。
+   - 顶部「🔄 新世界 / 选图」按钮可随时唤回大厅。
+   - 非法种子/非法地图的错误在面板内提示，不会崩溃。
+
+5) 验证
+   - 全量 pytest 130 项全绿（原有 119 项无破坏性改动）。
+   - 端到端实测：GET /api/maps 返回 4 张地图；依次切到
+     torus/player、ellipsoid/god、double_torus/player 均成功；
+     玩家模式下 /api/state/debug 返回 HTTP 403；非法 map_id 返回 HTTP 400 且报错清晰。
+
+三、文件功能说明（本次涉及）
+--------------------------------------------------------------------------------
+【新增】
+  src/the_curved_world/maps.py   MapMetadata / MapRegistry / @register_map /
+                                 4 张内置地图 / world_config_for / map_id_for
+  tests/test_map_registry.py     注册、按 id 构造、非法 id、元数据完整性、
+                                 装饰器扩展、坏元数据拒绝（8 项）
+
+【修改】
+  src/the_curved_world/server.py GameSession 支持 map_id/mode；reset_world/summary；
+                                 GET /api/maps；POST /api/session/new；debug 门禁；
+                                 玩家状态增加 map_id/mode/periodic
+  src/the_curved_world/config.py default_config() 委托给地图注册表
+  src/the_curved_world/geometry.py SmoothSurface 增加统一 name
+  src/main.py                    新增 --map；全入口透传地图
+  src/the_curved_world/demo.py   run_demo(world_config=...) 并打印地图名
+  web/index.html                 大厅模态框 + 「新世界/选图」按钮
+  web/style.css                  毛玻璃大厅样式
+  web/app.js                     大厅状态机：取地图、显示简介、进入世界、换图/换模式
+  tests/test_server.py           追加 /api/maps、会话切换、玩家模式门禁（共 14 项）
+  README.md / AI_USAGE.md        记录 Task 9
+
+四、测试结果
+--------------------------------------------------------------------------------
+汇总：130 项测试全部通过（0 失败，0 跳过）。
+
+  模块                          用例数   结果
+  ----------------------------  ------   ------
+  test_geometry.py                11     通过
+  test_world_generation.py         9     通过
+  test_detector.py                 6     通过
+  test_gameplay.py                11     通过
+  test_cli.py                     13     通过
+  test_render.py                   8     通过
+  test_math_audit.py               7     通过
+  test_information_boundary.py     4     通过
+  test_demo.py                     4     通过
+  test_session.py                  8     通过
+  test_server.py                  14     通过   （含 Task 9 追加 3 项）
+  test_large_scale.py             10     通过
+  test_closed_manifold.py         16     通过
+  test_map_registry.py             8     通过   （Task 9 新增）
+  test_smoke.py                    1     通过
+  ----------------------------  ------   ------
+  合计                           130     全部通过
+
+五、每项测试的终端命令
+--------------------------------------------------------------------------------
+（在项目根目录 C:\Users\gzfan\Desktop\AI Empowered 下执行）
+
+【全量测试】
+  .\.venv\Scripts\python.exe -m pytest
+  预期输出：130 passed
+
+【分模块测试】
+  曲面几何与高斯曲率（11 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_geometry.py
+  世界生成与可复现性（9 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_world_generation.py
+  探测器与信息边界（6 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_detector.py
+  探索玩法（11 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_gameplay.py
+  终端命令界面（13 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_cli.py
+  渲染与视图（8 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_render.py
+  数学审计（7 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_math_audit.py
+  信息泄露审计（4 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_information_boundary.py
+  端到端 Demo（4 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_demo.py
+  交互式会话（8 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_session.py
+  Web API 与会话重置（14 项，Task 9 追加 3 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_server.py
+  大尺度图曲面与工具链（10 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_large_scale.py
+  封闭紧致流形（16 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_closed_manifold.py
+  地图注册表（8 项，Task 9 新增）
+    .\.venv\Scripts\python.exe -m pytest tests/test_map_registry.py
+  入口冒烟（1 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_smoke.py
+
+六、如何启动与自测
+--------------------------------------------------------------------------------
+  Web 启动大厅（推荐；浏览器打开 http://127.0.0.1:8000/）
+    .\.venv\Scripts\python.exe -m src.main --serve --port 8000
+
+  直接以某张地图启动（跳过选择）
+    .\.venv\Scripts\python.exe -m src.main --serve --map torus_genus1
+    .\.venv\Scripts\python.exe -m src.main --serve --map ellipsoid_genus0 --debug
+    .\.venv\Scripts\python.exe -m src.main --serve --map double_torus
+    .\.venv\Scripts\python.exe -m src.main --serve --map planar_landscape
+
+  终端实时游玩 / 可复现 Demo
+    .\.venv\Scripts\python.exe -m src.main --play --map torus_genus1 --seed 12345
+    .\.venv\Scripts\python.exe -m src.main --demo-scenario --map planar_landscape
+
+  接口自测（curl 示例）
+    curl http://127.0.0.1:8000/api/maps
+    curl -X POST -H "Content-Type: application/json" -d "{\"map_id\":\"ellipsoid_genus0\",\"seed\":7,\"mode\":\"god\"}" http://127.0.0.1:8000/api/session/new
+    curl http://127.0.0.1:8000/api/state/player
+    curl -i http://127.0.0.1:8000/api/state/debug        （玩家模式应返回 403）
+
+  本轮实测样本
+    GET /api/maps -> 4 张地图，default = torus_genus1
+    POST /api/session/new {torus_genus1, 12345, player} -> 会话就绪（periodic=True）
+    POST /api/session/new {ellipsoid_genus0, 7, god}    -> debug 模型 deformed ellipsoid
+    切回 player 模式 -> /api/state/debug 返回 HTTP 403
+    非法 map_id -> HTTP 400，错误信息列出可用 id
+
+七、已知限制（如实标注）
+--------------------------------------------------------------------------------
+1. 地图元数据中的 factory 不可 JSON 序列化，to_dict() 已按设计剔除。
+2. 大厅的“全知模式”会直接放行 /api/state/debug（这是设计意图：答辩演示用）；
+   若要强制限制，可只用 --debug 启动并以玩家模式游玩。
+3. 地图热插拔仅限同进程内注册；新增地图文件需要被导入才会执行装饰器。
+4. 前端大厅状态（地图/模式/种子）保存在内存，刷新页面会回到默认。
+5. 之前各任务的已知限制（椭球两极拓扑退化、数值曲率积分、迷雾本地维护、
+   指向器为限次量化提示等）依然成立。
+
+八、本地提交记录（均未推送）
+--------------------------------------------------------------------------------
+  56031bc  feat(maps): add extensible map registry and lobby launcher UI
+  d2229e2  test(maps): 补充地图注册表、会话切换与调试门禁测试
+  1ad68fe  docs: README/AI_USAGE 更新 Task 9 地图注册与启动大厅
+
+================================================================================
+报告结束
+================================================================================

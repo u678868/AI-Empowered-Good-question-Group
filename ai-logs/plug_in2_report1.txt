@@ -1,0 +1,185 @@
+﻿================================================================================
+The Curved World —— Task 10 完成报告：归档封装、submission 打包与扩展槽规范化
+文件：report/plug_in2_report1.txt
+对应任务：process/Plug-in2.txt（Task 10 — Packaging & Extension Slots）
+生成日期：2026-10-11
+项目根目录：C:\Users\gzfan\Desktop\AI Empowered
+运行环境：Python 3.13.2（.venv）/ numpy 2.5.4 / matplotlib 3.11.2 / pytest 9.1.1
+================================================================================
+（说明：本报告为追加记录，之前的 test_report / active_report1~3 /
+ topology_report1 / plugin_report1 全部保留，未删除任何历史记录。）
+
+零、本轮执行范围说明（重要）
+--------------------------------------------------------------------------------
+Plug-in2 第一段要求「推送到 GitHub」。但用户本轮明确指示：
+  “还不要commit” + “封装好后再测试一下功能，确认没问题后告诉我”。
+因此本轮【没有 commit、没有 push】。所有改动仅在工作区，等你确认。
+
+一、任务目标
+--------------------------------------------------------------------------------
+1) 把阶段性成果封装为符合黑客松规范的 submission/ 打包目录，并一键生成
+   体积克制的 submission.zip（排除 .venv / __pycache__ / .pytest_cache / .git）。
+2) 规范化两类“即插即用”扩展槽：新地图、新几何测量道具。
+3) 把开始游戏界面（大厅）改为英文，保持 UI 语言统一。
+
+二、完成的主要工作
+--------------------------------------------------------------------------------
+1) 地图扩展槽：maps.py -> maps/ 插件包（自动发现）
+   - 新结构：src/the_curved_world/maps/__init__.py（注册表 + 公共 API + discover()）
+             src/the_curved_world/maps/builtin.py（4 张内置地图注册）
+   - discover() 在包导入时自动 import 包内所有非下划线开头的 *.py，
+     因此把新地图文件丢进 maps/ 即完成扩展，无需改动 server.py / world.py。
+   - 4 张内置地图的名称与数学简介已改为英文，便于前端下拉框统一显示：
+       torus_genus1      Deformed Torus (genus 1)
+       ellipsoid_genus0  Wavy Ellipsoid (genus 0)
+       double_torus      Two-hole Surface (genus-2 look)
+       planar_landscape  Classic Planar Landscape
+
+2) 道具扩展槽：前端工具栏配置化
+   - web/index.html 的工具栏改为空容器 <div id="toolbar">；
+   - web/app.js 新增 TOOLS 配置数组（{id, name, key}），按钮与快捷键
+     由 renderToolbar() 自动生成；新增道具只需往数组里追加一行。
+
+3) 开始游戏界面英文化（用户要求）
+   - web/index.html 的大厅、按钮、提示、面板说明全部改为英文；
+   - web/app.js 的相关提示信息同步英文化；
+   - 校验：web/ 三个文件均不含中文字符（脚本实测 "clean"）。
+
+4) 打包脚本与 submission/ 产物
+   - 新增 scripts/package_submission.py：一键生成 submission/ 与 submission.zip。
+   - Makefile 新增 `package` 目标（make package）。
+   - submission/ 结构：
+       src/ web/ docs/ tests/ screenshots/ ai-logs/
+       README.md  AI_USAGE.md  requirements.txt  requirements-dev.txt
+       Makefile  pyproject.toml  DEMO_LINK.md
+   - 清洁检查：递归扫描 submission/ 与 zip 内条目，
+     .venv / __pycache__ / .pytest_cache / .git / *.pyc / process / report 命中数均为 0。
+   - ai-logs/ 归档了 7 份历史报告（本报告写入后重新打包，故含本轮报告）。
+   - screenshots/：3 张无头渲染截图（与仿真同一份几何代码，非伪造）：
+       01_local_tangent_view.png   玩家局部切空间视图
+       02_omniscient_3d_view.png   全知视图（含隐藏出口）
+       03_map_gallery.png          四张地图一览
+     另附 screenshots/README.md，说明浏览器截图（大厅 / 网页会话）需手动补拍。
+
+5) 文档补充
+   - docs/contributing_extensions.md：两类扩展槽的三步操作示例与验证命令。
+   - README.md 新增「赛题背景与竞品对比」章节（如实描述，不夸大）。
+
+三、文件功能说明（本次涉及）
+--------------------------------------------------------------------------------
+【新增】
+  src/the_curved_world/maps/__init__.py   注册表 / MapMetadata / @register_map / discover()
+  src/the_curved_world/maps/builtin.py    4 张内置地图（英文名与简介）
+  scripts/package_submission.py           一键封装：构建 submission/ 并压缩为 zip
+  docs/contributing_extensions.md         新地图 / 新道具扩展指南
+  submission/（生成物）                    提交工件目录
+  submission.zip（生成物）                 约 642.8 KiB
+
+【修改】
+  web/index.html                        大厅与界面整体英文化；工具栏改空容器
+  web/app.js                            TOOLS 配置数组 + renderToolbar()；提示英文化
+  web/style.css                         大厅样式（毛玻璃）
+  Makefile                              新增 package 目标
+  README.md                             新增赛题背景与竞品对比
+  （删除）src/the_curved_world/maps.py   已由 maps/ 包取代
+
+四、测试结果
+--------------------------------------------------------------------------------
+汇总：130 项测试全部通过（0 失败，0 跳过）—— 与 Task 9 相同的 130 项，
+本轮为“封装 + 英文化”，未新增测试，未破坏任何既有测试。
+
+  模块                          用例数   结果
+  ----------------------------  ------   ------
+  test_geometry.py                11     通过
+  test_world_generation.py         9     通过
+  test_detector.py                 6     通过
+  test_gameplay.py                11     通过
+  test_cli.py                     13     通过
+  test_render.py                   8     通过
+  test_math_audit.py               7     通过
+  test_information_boundary.py     4     通过
+  test_demo.py                     4     通过
+  test_session.py                  8     通过
+  test_server.py                  14     通过
+  test_large_scale.py             10     通过
+  test_closed_manifold.py         16     通过
+  test_map_registry.py             8     通过
+  test_smoke.py                    1     通过
+  ----------------------------  ------   ------
+  合计                           130     全部通过
+
+五、每项测试的终端命令
+--------------------------------------------------------------------------------
+（在项目根目录 C:\Users\gzfan\Desktop\AI Empowered 下执行）
+
+【全量测试】
+  .\.venv\Scripts\python.exe -m pytest
+  预期输出：130 passed
+
+【分模块测试】
+  .\.venv\Scripts\python.exe -m pytest tests/test_geometry.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_world_generation.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_detector.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_gameplay.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_cli.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_render.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_math_audit.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_information_boundary.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_demo.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_session.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_server.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_large_scale.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_closed_manifold.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_map_registry.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_smoke.py
+
+【打包】
+  .\.venv\Scripts\python.exe scripts/package_submission.py
+  或： make package
+
+六、封装与功能自检结果
+--------------------------------------------------------------------------------
+  打包：submission/ 共 56 个文件；submission.zip = 642.8 KiB
+  顶层结构：ai-logs(7) docs(3) screenshots(4) src(17) tests(16) web(3) + 7 个根文件
+  清洁检查：.venv / __pycache__ / .pytest_cache / .git / *.pyc 命中数 = 0
+
+  功能实测（本地 http://127.0.0.1，随机端口）
+    大厅下拉（英文名）：Two-hole Surface / Wavy Ellipsoid / Classic Planar Landscape /
+                        Deformed Torus
+    切换 4 张地图：torus_genus1(player) / ellipsoid_genus0(god) /
+                   double_torus(player) / planar_landscape(player) 全部成功，
+                    periodic 标志分别为 True/True/True/False
+    安全门禁：玩家模式下 /api/state/debug -> HTTP 403；全知模式 -> 正常返回
+    道具：move / triangle（内角和 3.139 rad，iint K dA≈0.0019，判定 saddle）/ pointer 均正常
+    CLI：--map 四张地图均可启动（--demo / --play / --serve 共用）
+
+七、未来新增扩展的三步示例
+--------------------------------------------------------------------------------
+【新地图】
+  1. 在 src/the_curved_world/maps/ 下新建 my_map.py
+  2. 写一个类：
+         @register_map(map_id="small_ring", name="Small Ring (genus 1)",
+                       description="...", topology=CLOSED_PERIODIC,
+                       placement={"min_separation": 4.0, "boundary_margin": 0.0,
+                                  "detector_scale": 4.0})
+         class SmallRingMap:
+             def build(self, params):
+                 return DeformedTorus(ring_radius=12.0, tube_radius=4.0)
+  3. 无需其它改动：discover() 自动注册 -> GET /api/maps、--map、大厅下拉自动出现。
+
+【新道具】
+  1. gameplay.py：在 ExplorationGame 增加测量方法（不得泄露出口坐标与真实距离）
+  2. server.py：在 GameSession.tool() 中按 payload["tool"] 派发新分支
+  3. web/app.js：往 TOOLS 数组追加 {id, name, key}（按钮与快捷键自动生成）
+
+八、已知限制（如实标注）
+--------------------------------------------------------------------------------
+1. 本轮按用户要求未提交、未推送；工作区含未跟踪的 process/ 与 report/（不纳入跟踪）。
+2. 浏览器大厅截图无法在无头环境生成，screenshots/ 只含 3 张无头渲染图 + 手动补拍说明。
+3. 地图热插拔限于同进程导入；新增地图文件需位于 maps/ 包内才会被 discover() 发现。
+4. 既有数学限制依旧成立：椭球两极拓扑退化、曲率积分为数值积分、
+   指向器为限次量化提示、迷雾仅在浏览器本地维护。
+
+================================================================================
+报告结束
+================================================================================

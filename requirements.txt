@@ -1,0 +1,4 @@
+# 运行依赖
+numpy>=1.26
+matplotlib>=3.8
+# Web 服务层（Task 6）只使用 Python 标准库 http.server：无需新增依赖

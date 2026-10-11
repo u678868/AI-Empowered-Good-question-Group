@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>The Curved World - Web Session</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>The Curved World</h1>
+    <div class="meta">
+      <span id="map-name">map -</span>
+      <span id="seed">seed -</span>
+      <span id="steps">steps 0</span>
+      <span id="pointers">pointers -</span>
+      <span id="mode" class="badge">player view</span>
+    </div>
+    <button id="open-lobby" class="ghost">&#8635; New world / Choose map</button>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>Player View - local tangent map</h2>
+      <canvas id="player-canvas" width="640" height="640"></canvas>
+      <p class="hint">
+        The player is always at the centre; only a local patch of radius R is drawn and the
+        rest stays under geometric fog. The coordinate grid is warped by the local first
+        fundamental form (E, F, G) -- a hint that the world is not flat.
+      </p>
+      <p class="hint">
+        Move: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrow keys (hold to walk).
+        <kbd>1</kbd> ruler &middot; <kbd>2</kbd> angle gauge &middot; <kbd>3</kbd> curvature &middot;
+        <kbd>4</kbd> pointer &middot; <kbd>G</kbd> god view &middot; <kbd>Esc</kbd> close god view.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>Instrument Panel</h2>
+      <canvas id="gauge" width="240" height="130"></canvas>
+      <div id="detector-text" class="readout">signal -</div>
+      <div class="readout">Gaussian curvature K: <span id="curvature">-</span></div>
+      <div class="readout">position (u,v,z): <span id="position">-</span></div>
+
+      <div class="controls">
+        <label>step
+          <select id="step-size">
+            <option value="1">1x</option>
+            <option value="2">2x</option>
+            <option value="3">3x</option>
+          </select>
+        </label>
+      </div>
+
+      <div id="toolbar" class="toolbar"></div>
+
+      <div id="tool-card" class="card hidden"></div>
+
+      <h3>Markers</h3>
+      <div id="markers" class="markers"><em>none yet</em></div>
+      <div id="message" class="message"></div>
+    </section>
+
+    <section class="panel hidden" id="god-panel">
+      <h2>God View <span class="badge warn">debug</span></h2>
+      <canvas id="god-canvas" width="760" height="520"></canvas>
+      <p class="hint">
+        Global mesh of the closed / bounded surface. Requires either the server to run with
+        <code>--debug</code> or the lobby to pick the omniscient mode. Drag to rotate.
+      </p>
+    </section>
+  </main>
+
+  <div id="lobby-modal" class="modal">
+    <div class="modal-card">
+      <h2>Enter the World &middot; The Curved World</h2>
+      <p class="hint">Pick a map, a play mode and a random seed, then enter the academy.</p>
+
+      <label class="field">Map
+        <select id="map-select"></select>
+      </label>
+      <p id="map-description" class="map-description"></p>
+
+      <fieldset class="field">
+        <legend>Play mode</legend>
+        <label class="radio"><input type="radio" name="mode" value="player" checked /> Player mode - explores with a local tangent view; the exit and the true distance stay hidden</label>
+        <label class="radio"><input type="radio" name="mode" value="god" /> Omniscient mode - opens the global 3D mesh and marks the exit (for demos)</label>
+      </fieldset>
+
+      <label class="field">Random seed (leave empty for a random one)
+        <input id="seed-input" type="number" placeholder="e.g. 12345" />
+      </label>
+
+      <div class="modal-actions">
+        <button id="enter-world" class="primary">Enter the World</button>
+      </div>
+      <p id="lobby-error" class="message error"></p>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

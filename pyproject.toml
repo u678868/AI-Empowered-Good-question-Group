@@ -1,0 +1,12 @@
+[project]
+name = "ai-empowered"
+version = "0.1.0"
+description = "AI Empowered 竞赛项目脚手架"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]

@@ -1,0 +1,191 @@
+﻿================================================================================
+The Curved World —— Task 7 完成报告：大尺度流形、局部平面视角与微分几何工具链
+文件：report/active_report3.txt
+对应任务：process/active_test2.txt（Task 7 — 大尺度流形探索 + 微分几何解谜工具链）
+生成日期：2026-10-11
+项目根目录：C:\Users\gzfan\Desktop\AI Empowered
+运行环境：Python 3.13.2（.venv）/ numpy 2.5.4 / matplotlib 3.11.2 / pytest 9.1.1
+================================================================================
+
+一、任务目标
+--------------------------------------------------------------------------------
+在既有 Web 交互架构与数学引擎之上，实现“大尺度流形探索、平面局部视角及微分
+几何解谜工具链”：
+1) 参数域大幅扩展，曲面引入多尺度正弦 + 混合高斯丘，K 有清晰正/负聚集区；
+2) 玩家平面局部视角：玩家居中、几何迷雾、按第一基本形式畸变的坐标网格；
+3) 工具链落地：高斯-博内测地三角测角仪、有限次切平面指向器；
+4) 交互：按住连续行走（防抖 + 步长配置）、数字键 / 按钮切换工具。
+
+二、完成的主要工作
+--------------------------------------------------------------------------------
+1) 大尺度参数域与多尺度地貌（config.py / geometry.py）
+   - 默认域由 6x6 扩到 [-50, 50] x [-50, 50]（100x100）。
+   - SurfaceConfig 新增 waves 元组：地形 = 4 个不同波长的正弦项（0.135 / 0.265 /
+     0.52 / 1.05 波数级别）+ 8 个混合高斯丘（山峰、凹陷、宽阔穹顶），处处 C-infinity。
+   - 实测：高度范围约 [-8.7, 8.7]；高斯曲率 K 约 [-0.25, 0.31]，
+     K>0.01 占约 33%、K<-0.01 占约 33% —— 正曲率聚集区与负曲率隘口都清晰。
+   - 尺度自洽：min_separation=25、boundary_margin=3、detector_scale=25、
+     移动步长 2.0、捕获半径 4.0。
+
+2) 玩家平面视图（Fog of War & Local Tangent View）
+   - 后端：/api/state/player 的补丁**始终以玩家为中心**（不再按域裁剪），
+     并附带每个采样点的第一基本形式 E、F、G（半径 R=15，33x33）。
+   - 前端：按局部面积元 sqrt(E*G - F^2) 相对均值对网格与高度栅格做
+     **相对压缩 / 拉伸**（WARP_GAIN=0.35），叠加分层等高着色与网格线。
+   - 几何迷雾：前端维护 100x100 全局探索位图（视野半径 12 格），未走区域保持暗色。
+
+3) 微分几何工具链
+   - 第一基本形式：SmoothSurface.first_fundamental_form() -> (E, F, G)，
+     SmoothSurface.area_element() -> sqrt(E G - F^2)（含一致性测试）。
+   - 测地三角测角仪（tool: triangle）：
+       * 切平面内角和 sum(theta) 与超出 pi 的余量；
+       * 数值曲率面积分 iint_T K dA（dA = sqrt(1+fx^2+fy^2) dx dy）；
+       * 高斯-博内残差 = sum(theta) - pi - iint_T K dA（如实给出，不宣称恒为 0）。
+     前端以“测量仪卡片”展示；>180 度提示正曲率隆起，<180 度提示负曲率鞍部。
+   - 切平面指向器（tool: pointer）：**有限次数**（默认 3 次）。
+     仅返回切平面内的**量化方位角**（默认 16 扇区 = 22.5 度）与法向**俯仰角**
+     （15 度量化），不返回出口坐标、精确距离或真实三维偏移。
+
+4) 交互体验与热键
+   - 前端支持**按住 WASD / 方向键连续行走**（防抖：首次立即移动，其后约 90ms 一步）。
+   - 步长倍数选择（1x / 2x / 3x），服务端 move 支持 steps 参数（1..10 夹紧）。
+   - 数字键 1/2/3/4 = 测距尺 / 测角仪 / 高斯曲率 / 指向器；G 切上帝视角。
+   - 工具栏按钮与卡片展示（测角仪卡片、指向器卡片）。
+
+5) 信息边界
+   - 玩家端接口仍不含出口坐标 / 真实距离；指向器只给量化提示，且次数受限。
+   - 新增测试断言指向器的返回字段白名单，且不含出口坐标与真实距离。
+
+三、文件功能说明（本次涉及）
+--------------------------------------------------------------------------------
+【修改】
+  src/the_curved_world/config.py   默认域扩到 100x100；SurfaceConfig.waves 多尺度波；
+                                   WorldConfig 尺度默认值对齐（25 / 3 / 25）
+  src/the_curved_world/geometry.py height/gradient/second_derivatives 遍历全部波项；
+                                   新增 first_fundamental_form() / area_element()
+  src/the_curved_world/gameplay.py GameplayConfig 尺度对齐 + max_pointer_uses /
+                                   pointer_sectors；新增 curvature_area_integral()、
+                                   triangle_report()（高斯-博内）、release_pointer()
+  src/the_curved_world/server.py   补丁改为居中且附 E/F/G；move 支持 steps；
+                                   新增 tool: triangle / pointer；player_state 暴露
+                                   pointer_uses_remaining
+  web/index.html / style.css       新增工具卡片区、步长选择、热键提示
+  web/app.js                       玩家居中局部切空间视图、度量畸变网格与栅格、
+                                   按住连续行走、热键 1/2/3/4、测角仪/指向器卡片
+  README.md / AI_USAGE.md          记录 Task 7
+  tests/test_gameplay.py           适配新步长
+  tests/test_server.py             适配 6 位取整后的容差
+
+【新增】
+  tests/test_large_scale.py        大尺度域、坐标钳制、第一基本形式、高斯-博内、
+                                   指向器限量与不泄露 —— 共 10 项
+
+四、测试结果
+--------------------------------------------------------------------------------
+汇总：103 项测试全部通过（0 失败，0 跳过）。
+
+  模块                          用例数   结果
+  ----------------------------  ------   ------
+  test_geometry.py                11     通过
+  test_world_generation.py         9     通过
+  test_detector.py                 6     通过
+  test_gameplay.py                11     通过
+  test_cli.py                     13     通过
+  test_render.py                   8     通过
+  test_math_audit.py               7     通过
+  test_information_boundary.py     4     通过
+  test_demo.py                     4     通过
+  test_session.py                  8     通过
+  test_server.py                  11     通过
+  test_large_scale.py             10     通过   （Task 7 新增）
+  test_smoke.py                    1     通过
+  ----------------------------  ------   ------
+  合计                           103     全部通过
+
+五、每项测试的终端命令
+--------------------------------------------------------------------------------
+（在项目根目录 C:\Users\gzfan\Desktop\AI Empowered 下执行）
+
+【全量测试】
+  .\.venv\Scripts\python.exe -m pytest
+  预期输出：103 passed
+
+【分模块测试】
+  曲面几何 + 高斯曲率（11 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_geometry.py
+  世界生成与可复现性（9 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_world_generation.py
+  探测器与信息边界（6 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_detector.py
+  探索玩法（11 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_gameplay.py
+  终端命令界面（13 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_cli.py
+  渲染与视图（8 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_render.py
+  数学审计（7 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_math_audit.py
+  信息泄露审计（4 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_information_boundary.py
+  端到端 Demo（4 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_demo.py
+  交互式会话（8 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_session.py
+  Web API（11 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_server.py
+  大尺度流形与工具链（10 项，Task 7 新增）
+    .\.venv\Scripts\python.exe -m pytest tests/test_large_scale.py
+  入口冒烟（1 项）
+    .\.venv\Scripts\python.exe -m pytest tests/test_smoke.py
+
+六、如何启动与自测
+--------------------------------------------------------------------------------
+  终端实时游玩
+    .\.venv\Scripts\python.exe -m src.main --play --seed 12345 --view player
+
+  Web 双视角（玩家接口安全；不含特权数据）
+    .\.venv\Scripts\python.exe -m src.main --serve --port 8000
+    浏览器打开 http://127.0.0.1:8000/
+
+  Web 双视角 + 特权调试接口（上帝视角）
+    .\.venv\Scripts\python.exe -m src.main --serve --debug
+
+  可复现 Demo（固定种子）
+    .\.venv\Scripts\python.exe -m src.main --demo-scenario
+    本轮实测：35 步 / 20 次读数 / 2 个标记 处获胜（大尺度世界）
+
+  接口自测（curl 示例）
+    curl http://127.0.0.1:8000/api/state/player
+    curl -X POST -H "Content-Type: application/json" -d "{\"dx\":1,\"dy\":0,\"steps\":4}" http://127.0.0.1:8000/api/action/move
+    curl -X POST -H "Content-Type: application/json" -d "{\"tool\":\"triangle\",\"markers\":[\"A\",\"B\",\"C\"]}" http://127.0.0.1:8000/api/action/tool
+    curl -X POST -H "Content-Type: application/json" -d "{\"tool\":\"pointer\"}" http://127.0.0.1:8000/api/action/tool
+
+  本轮实测样本
+    玩家状态：position=[40.36, 4.34]，补丁 33x33，K=0.0003，pointers=3
+    move steps=4 -> steps=4
+    triangle：内角和 179.897 度，character=negative curvature (saddle)，
+              高斯-博内残差 1.68e-4 rad
+    pointer：方位角 -157.5 度、俯仰 15.0 度、剩余 2 次
+
+七、已知限制（如实标注）
+--------------------------------------------------------------------------------
+1. 三角内角和用的是**切平面角度**，高斯-博内对测地三角才严格成立；残差已如实给出，
+   未宣称恒为 0。
+2. 曲率面积分是**数值**面积分（域内均匀格点中值），不是解析积分。
+3. 玩家视图是 Canvas 2D 的“局部平面”表达，网格畸变是**视觉提示**（面积元相对值），
+   不是严格的等距嵌入。
+4. 迷雾在浏览器本地维护，刷新页面会重置；不写入后端。
+5. 指向器是**有意**放松方向边界的有限次玩法道具：只给量化方位/俯仰，不给坐标、
+   精确距离与真实三维偏移；次数用尽即报错。
+6. 曲面族为“多尺度正弦 + 高斯丘”，全局光滑性由解析构造保证，不对任意用户函数成立。
+
+八、本地提交记录（均未推送）
+--------------------------------------------------------------------------------
+  47cbbad  feat(world): 扩展为大尺度多尺度地貌并新增微分几何内核（Task 7）
+  332a2fb  feat(web): 局部切空间视图、度量畸变网格与几何工具箱（Task 7）
+  ce374e7  test(large-scale): 补充大尺度域、第一基本形式与高斯-博内测试
+  a0e1594  docs: README/AI_USAGE 更新 Task 7 大尺度流形与工具链
+
+================================================================================
+报告结束
+================================================================================

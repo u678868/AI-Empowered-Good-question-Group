@@ -1,0 +1,465 @@
+"""Interface-independent exploration mechanics for The Curved World.
+
+This module contains the game logic only: movement, detector readings, the
+exploration log, markers, the measurement probe and the victory condition. It
+never prints or plots -- user interfaces (the CLI in :mod:`cli`, or a future
+Matplotlib/3D renderer) drive it and read its state.
+
+Movement happens in *parameter space* and the surface height is recomputed after
+every step, so the player always stays on the surface. This is deliberately not
+a geodesic walk and not a physically realistic simulation.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+
+from src.the_curved_world.config import ConfigError
+from src.the_curved_world.geometry import ambient_distance
+from src.the_curved_world.manifold import wrap_parameter
+from src.the_curved_world.observations import (
+    ObservationConfig,
+    PlayerObservation,
+    PlayerObserver,
+    PlayerView,
+)
+from src.the_curved_world.world import DebugView, WorldState
+
+ParameterPosition = Tuple[float, float]
+
+
+class GameError(ValueError):
+    """Raised for invalid gameplay actions (bad names, unknown markers, ...)."""
+
+
+@dataclass(frozen=True)
+class GameplayConfig:
+    """Tunable exploration parameters.
+
+    ``move_speed`` (parameter units per second) times ``time_step`` (seconds per
+    move) gives the fixed step length. ``capture_radius`` is the ambient
+    Euclidean victory radius and must be at least the step length so the exit
+    cannot be stepped straight over.
+    """
+
+    move_speed: float = 1.0
+    time_step: float = 0.25
+    capture_radius: float = 3.0
+    max_pointer_uses: int = 3
+    pointer_sectors: int = 16
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("move_speed", self.move_speed),
+            ("time_step", self.time_step),
+            ("capture_radius", self.capture_radius),
+        ):
+            if not np.isfinite(value) or value <= 0.0:
+                raise ConfigError(f"GameplayConfig.{name} must be finite and > 0")
+        if self.capture_radius < self.step_length:
+            raise ConfigError(
+                "GameplayConfig.capture_radius must be >= move_speed * time_step "
+                f"({self.step_length}), got {self.capture_radius}"
+            )
+        if int(self.max_pointer_uses) < 0:
+            raise ConfigError("GameplayConfig.max_pointer_uses must be >= 0")
+        if int(self.pointer_sectors) < 1:
+            raise ConfigError("GameplayConfig.pointer_sectors must be >= 1")
+
+    @property
+    def step_length(self) -> float:
+        return self.move_speed * self.time_step
+
+
+@dataclass(frozen=True)
+class Marker:
+    """A player-placed marker. It is never the hidden exit."""
+
+    name: str
+    position: ParameterPosition
+    signal: float
+    label: str
+
+
+@dataclass(frozen=True)
+class LogEntry:
+    """One player-visible exploration log record (no hidden state)."""
+
+    index: int
+    position: ParameterPosition
+    signal: float
+    label: str
+    trend: str
+    note: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MoveResult:
+    """Outcome of a single movement step."""
+
+    position: ParameterPosition
+    moved: bool
+    clamped: bool
+    won: bool
+
+
+@dataclass(frozen=True)
+class GameSummary:
+    """Completion summary shown on victory."""
+
+    seed: int
+    observations: int
+    markers: int
+    steps: int
+    elapsed_time: float
+
+
+class ExplorationGame:
+    """Interface-independent exploration game engine."""
+
+    def __init__(
+        self,
+        world: WorldState,
+        gameplay_config: GameplayConfig | None = None,
+        observation_config: ObservationConfig | None = None,
+    ) -> None:
+        if not isinstance(world, WorldState):
+            raise TypeError("ExplorationGame requires a WorldState")
+        self._world = world
+        self._player: PlayerView = world.player_view()
+        self._observer: PlayerObserver = world.player_observer(observation_config)
+        self._config = GameplayConfig() if gameplay_config is None else gameplay_config
+        self._pointer_uses_remaining = int(self._config.max_pointer_uses)
+        self._position: ParameterPosition = (float(world.start[0]), float(world.start[1]))
+        self._steps = 0
+        self._elapsed = 0.0
+        self._log: List[LogEntry] = []
+        self._markers: Dict[str, Marker] = {}
+        self._trajectory: List[ParameterPosition] = [self._position]
+        self._won = False
+        self._update_victory()
+
+    # -- read-only player state -------------------------------------------
+
+    @property
+    def player_view(self) -> PlayerView:
+        return self._player
+
+    @property
+    def position(self) -> ParameterPosition:
+        return self._position
+
+    @property
+    def steps(self) -> int:
+        return self._steps
+
+    @property
+    def elapsed_time(self) -> float:
+        return self._elapsed
+
+    @property
+    def won(self) -> bool:
+        return self._won
+
+    @property
+    def config(self) -> GameplayConfig:
+        return self._config
+
+    @property
+    def step_length(self) -> float:
+        return self._config.step_length
+
+    @property
+    def log(self) -> Tuple[LogEntry, ...]:
+        return tuple(self._log)
+
+    @property
+    def markers(self) -> Tuple[Marker, ...]:
+        return tuple(self._markers.values())
+
+    @property
+    def trajectory(self) -> Tuple[ParameterPosition, ...]:
+        return tuple(self._trajectory)
+
+    # -- actions -----------------------------------------------------------
+
+    def move(self, dx: float, dy: float) -> MoveResult:
+        """Move one fixed-length step in the direction ``(dx, dy)``.
+
+        The direction is normalised so diagonal movement is not faster than
+        axis-aligned movement. Parameter coordinates are clamped to the domain,
+        so the player never leaves the valid region (``clamped`` reports this).
+        """
+        dx = float(dx)
+        dy = float(dy)
+        if not (np.isfinite(dx) and np.isfinite(dy)):
+            raise GameError("movement direction must be finite numbers")
+        norm = math.hypot(dx, dy)
+        if norm == 0.0:
+            return MoveResult(self._position, moved=False, clamped=False, won=self._won)
+
+        step = self._config.step_length
+        target = (self._position[0] + dx / norm * step, self._position[1] + dy / norm * step)
+        self._position, clamped = self._clamp(target)
+        self._trajectory.append(self._position)
+        self._steps += 1
+        self._elapsed += self._config.time_step
+        self._update_victory()
+        return MoveResult(self._position, moved=True, clamped=clamped, won=self._won)
+
+    def read_detector(self, note: str | None = None) -> PlayerObservation:
+        """Take a detector reading, append it to the log and return it."""
+        observation = self._observer.observe(self._position)
+        self._log.append(
+            LogEntry(
+                index=len(self._log) + 1,
+                position=self._position,
+                signal=observation.signal,
+                label=observation.label,
+                trend=observation.trend,
+                note=note,
+            )
+        )
+        return observation
+
+    def place_marker(self, name: str) -> Marker:
+        """Place a named marker at the current position (does not move)."""
+        cleaned = (name or "").strip()
+        if not cleaned:
+            raise GameError("marker name must be non-empty")
+        if cleaned in self._markers:
+            raise GameError(f"marker {cleaned!r} already exists")
+        observation = self._observer.peek(self._position)
+        marker = Marker(
+            name=cleaned,
+            position=self._position,
+            signal=observation.signal,
+            label=observation.label,
+        )
+        self._markers[cleaned] = marker
+        return marker
+
+    def triangle_angle_sum(self, name_a: str, name_b: str, name_c: str) -> Dict[str, object]:
+        """Tangent-plane angle sum of the triangle formed by three markers.
+
+        Returns the three angles (radians), their sum and the excess over pi.
+        Honest scope: these are tangent-plane angles, an approximation to the
+        angle sum of a geodesic triangle -- not an exact geodesic computation.
+        """
+        positions = []
+        for name in (name_a, name_b, name_c):
+            marker = self._markers.get(name)
+            if marker is None:
+                raise GameError(f"unknown marker {name!r}")
+            positions.append(marker.position)
+        surface = self._player.surface
+        try:
+            angle_a = surface.tangent_angle(positions[0], positions[1], positions[2])
+            angle_b = surface.tangent_angle(positions[1], positions[2], positions[0])
+            angle_c = surface.tangent_angle(positions[2], positions[0], positions[1])
+        except ValueError as exc:
+            raise GameError(f"triangle requires three distinct markers: {exc}") from exc
+        total = angle_a + angle_b + angle_c
+        return {
+            "markers": (name_a, name_b, name_c),
+            "angles": (angle_a, angle_b, angle_c),
+            "sum": total,
+            "excess": total - math.pi,
+        }
+    def distance_between_markers(self, name_a: str, name_b: str) -> float:
+        """Ambient (straight-line 3D) distance between two player-known markers.
+
+        The hidden exit is never a valid endpoint because endpoints are marker
+        names only. This is the documented Euclidean distance, never a path
+        length along the surface.
+        """
+        marker_a = self._markers.get(name_a)
+        marker_b = self._markers.get(name_b)
+        if marker_a is None:
+            raise GameError(f"unknown marker {name_a!r}")
+        if marker_b is None:
+            raise GameError(f"unknown marker {name_b!r}")
+        return ambient_distance(
+            self._player.position(marker_a.position), self._player.position(marker_b.position)
+        )
+
+    def summary(self) -> GameSummary:
+        """Victory summary; contains the seed so the world can be replayed."""
+        return GameSummary(
+            seed=self._world.seed,
+            observations=len(self._log),
+            markers=len(self._markers),
+            steps=self._steps,
+            elapsed_time=self._elapsed,
+        )
+
+    def peek_detector(self) -> PlayerObservation:
+        """Player-facing reading at the current position.
+
+        Does not append to the log and does not change the trend baseline; used
+        by the visualiser to show the current signal without side effects.
+        """
+        return self._observer.peek(self._position)
+
+    @property
+    def pointer_uses_remaining(self) -> int:
+        return self._pointer_uses_remaining
+
+    def curvature_area_integral(self, name_a: str, name_b: str, name_c: str, subdivisions: int = 64) -> Dict[str, float]:
+        """Numerical ``iint_T K dA`` over the parameter triangle of three markers.
+
+        The surface area element is ``dA = sqrt(1 + f_x^2 + f_y^2) dx dy``; the
+        integral is a midpoint average over a uniform grid clipped to the
+        parameter triangle.
+        """
+        positions = []
+        for name in (name_a, name_b, name_c):
+            marker = self._markers.get(name)
+            if marker is None:
+                raise GameError(f"unknown marker {name!r}")
+            positions.append(np.asarray(marker.position, dtype=float))
+        point_a, point_b, point_c = positions
+        edge_b = point_b - point_a
+        edge_c = point_c - point_a
+        determinant = edge_b[0] * edge_c[1] - edge_b[1] * edge_c[0]
+        parameter_area = abs(float(determinant)) / 2.0
+        if parameter_area <= 1e-9:
+            raise GameError("triangle requires three non-collinear markers")
+
+        surface = self._player.surface
+        count = max(8, int(subdivisions))
+        coord_x = np.linspace(min(point_a[0], point_b[0], point_c[0]), max(point_a[0], point_b[0], point_c[0]), count)
+        coord_y = np.linspace(min(point_a[1], point_b[1], point_c[1]), max(point_a[1], point_b[1], point_c[1]), count)
+        grid_x, grid_y = np.meshgrid(coord_x, coord_y)
+        rel_x = grid_x - point_a[0]
+        rel_y = grid_y - point_a[1]
+        u = (rel_x * edge_c[1] - rel_y * edge_c[0]) / determinant
+        v = (edge_b[0] * rel_y - edge_b[1] * rel_x) / determinant
+        inside = (u >= 0.0) & (v >= 0.0) & (u + v <= 1.0)
+        if not bool(inside.any()):
+            raise GameError("triangle sampling failed; markers may be degenerate")
+        sample_x = grid_x[inside]
+        sample_y = grid_y[inside]
+        curvature = np.asarray(surface.gaussian_curvature(sample_x, sample_y), dtype=float)
+        stretch = np.asarray(surface.area_element(sample_x, sample_y), dtype=float)
+        return {
+            "parameter_area": parameter_area,
+            "curvature_integral": float(np.mean(curvature * stretch)) * parameter_area,
+            "samples": int(inside.sum()),
+        }
+
+    def triangle_report(self, name_a: str, name_b: str, name_c: str, subdivisions: int = 64) -> Dict[str, object]:
+        """Gauss-Bonnet report for the triangle formed by three markers.
+
+        Returns the tangent-plane angle sum and its excess over pi, together with
+        the numerical curvature area integral ``iint_T K dA``.
+
+        Honest scope: Gauss-Bonnet ``iint_T K dA = sum(theta) - pi`` is exact for a
+        *geodesic* triangle. Our angles live in tangent planes, so the residual is
+        reported rather than claimed to be zero.
+        """
+        angle_report = self.triangle_angle_sum(name_a, name_b, name_c)
+        integral = self.curvature_area_integral(name_a, name_b, name_c, subdivisions)
+        excess = float(angle_report["excess"])
+        curvature_integral = float(integral["curvature_integral"])
+        if excess > 1e-6:
+            character = "positive curvature (bulge)"
+        elif excess < -1e-6:
+            character = "negative curvature (saddle)"
+        else:
+            character = "flat"
+        return {
+            "markers": angle_report["markers"],
+            "angles": angle_report["angles"],
+            "sum": angle_report["sum"],
+            "excess": excess,
+            "curvature_integral": curvature_integral,
+            "gauss_bonnet_residual": excess - curvature_integral,
+            "parameter_area": integral["parameter_area"],
+            "samples": integral["samples"],
+            "character": character,
+            "kind": "gauss_bonnet_tangent_plane",
+        }
+
+    def release_pointer(self) -> Dict[str, object]:
+        """Spend one limited-use pointer: a coarse tangent-plane heading hint.
+
+        This is an intentional, *limited* gameplay affordance (an "Eye of Ender
+        lite"). It returns only a quantised bearing inside the tangent plane and a
+        quantised pitch angle -- never the exit coordinates, the exact distance or
+        the true 3D offset. The number of uses is capped by the configuration.
+        """
+        if self._pointer_uses_remaining <= 0:
+            raise GameError("no pointer uses remaining")
+
+        surface = self._player.surface
+        x, y = self._position
+        delta = 1e-3
+        player_point = np.asarray(surface.position(x, y), dtype=float)
+        exit_point = np.asarray(self._world.exit_position(), dtype=float)
+        direction = exit_point - player_point
+        length = float(np.linalg.norm(direction))
+        if length < 1e-9:
+            raise GameError("pointer is undefined at the exit")
+
+        normal = np.asarray(surface.normal(x, y), dtype=float)
+        # tangent-plane axes in parameter space: dP/dx and dP/dy, which map
+        # directly onto the 2D player view (x to the right, y upwards).
+        axis_x = np.asarray(surface.position(x + delta, y), dtype=float) - np.asarray(surface.position(x - delta, y), dtype=float)
+        axis_y = np.asarray(surface.position(x, y + delta), dtype=float) - np.asarray(surface.position(x, y - delta), dtype=float)
+        component_x = float(direction @ axis_x)
+        component_y = float(direction @ axis_y)
+        normal_component = float(direction @ normal)
+
+        # bearing of the tangent-plane projection, in the parameter tangent basis
+        bearing = math.degrees(math.atan2(component_y, component_x))
+        pitch = math.degrees(math.asin(max(-1.0, min(1.0, normal_component / length))))
+        sectors = max(1, int(self._config.pointer_sectors))
+        sector_width = 360.0 / sectors
+        bearing_quantised = round(bearing / sector_width) * sector_width
+        bearing_quantised = (bearing_quantised + 180.0) % 360.0 - 180.0
+        pitch_quantised = round(pitch / 15.0) * 15.0
+        radians = math.radians(bearing_quantised)
+
+        self._pointer_uses_remaining -= 1
+        return {
+            "bearing_degrees": bearing_quantised,
+            "pitch_degrees": pitch_quantised,
+            "tangent_direction": [math.cos(radians), math.sin(radians)],
+            "sector_width_degrees": sector_width,
+            "uses_remaining": self._pointer_uses_remaining,
+            "kind": "quantised_tangent_plane_hint",
+        }
+    def curvature(self) -> float:
+        """Analytic Gaussian curvature of the surface at the current position.
+
+        A local geometric reading; it does not expose any hidden world state.
+        """
+        return float(self._player.surface.gaussian_curvature(self._position[0], self._position[1]))
+    def debug_view(self) -> DebugView:
+        """PRIVILEGED: developer interface. Must be requested explicitly."""
+        return self._world.debug_view()
+
+    # -- internals ---------------------------------------------------------
+
+    def _clamp(self, position: ParameterPosition) -> Tuple[ParameterPosition, bool]:
+        surface = self._player.surface
+        if getattr(surface, "periodic", False):
+            # Closed manifold: wrap the parameters instead of clamping. There is
+            # no boundary wall, so a move never counts as clamped.
+            return (wrap_parameter(position[0]), wrap_parameter(position[1])), False
+        domain = surface.domain
+        x = min(max(position[0], domain.x_min), domain.x_max)
+        y = min(max(position[1], domain.y_min), domain.y_max)
+        return (x, y), (x != position[0] or y != position[1])
+
+    def _update_victory(self) -> None:
+        if self._won:
+            return
+        distance = ambient_distance(self._world.position(self._position), self._world.exit_position())
+        if distance <= self._config.capture_radius:
+            self._won = True
