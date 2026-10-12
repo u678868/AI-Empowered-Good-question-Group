@@ -21,7 +21,13 @@ EXPECTED_RADIUS = {
     "torus_genus1": 4.2,
     "ellipsoid_genus0": 2.4,
     "double_torus": 4.5,
+    "klein_bottle": 4.5,
     "planar_landscape": 4.5,
+    # Task 18 maps
+    "knot_garden": 3.0,
+    "klein_bottle_traditional": 3.2,
+    "elliptic_curve": 4.0,
+    "projective_plane": 3.0,
 }
 
 

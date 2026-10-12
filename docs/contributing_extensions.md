@@ -37,11 +37,52 @@ the lobby dropdown all pick the map up automatically.
 Rules of thumb:
 
 * the builder must return an object with `position(...)` and `domain`
-  (`SmoothSurface`, `DeformedTorus`, `DeformedEllipsoid`, `GenusTwoApproximation`
-  or your own duck-typed surface);
+  (`SmoothSurface`, `DeformedTorus`, `DeformedEllipsoid`, `GenusTwoApproximation`,
+  `KleinBottle` or your own duck-typed surface);
 * `topology` must be `closed_periodic` or `bounded_plane`;
 * keep the parameters in `placement` so the world generator can place the
   start/exit and scale the detector.
+
+### Closed surfaces publish their own chart identification
+
+If your surface identifies points in a way that is *not* the plain periodic
+square, subclass `ClosedManifold` and override `chart_periods()` (and
+`chart_copy_transforms()`, if one surface point has several chart copies). The
+default is one copy and `(2*pi, 2*pi)`.
+
+```python
+def chart_copy_transforms(self):
+    # each entry: (du, dv, flip_v) -> the copy (u + du, (-v if flip_v else v) + dv)
+    return ((0.0, 0.0, False), (math.pi, 0.0, True))
+```
+
+Worked examples in the repo: `KleinBottle` (periods `(4*pi, 2*pi)`, two sheets),
+`BottleKleinBottle` (same shape of contract, different immersion),
+`ProjectivePlane` (four sheets, two of them antipodal).
+
+Never hard-code those numbers in gameplay, obstacle or front-end code: call
+`surface.wrap(u, v)` / `surface.chart_relative(u_ref, v_ref, u, v)`.
+`/api/state/player` forwards the same contract to the browser as `twisted`,
+`orientable`, `chart_periods` and `chart_copies`, and `web/app.js` wraps deltas
+with it.
+
+Set `non_orientable=True` in `@register_map(...)` when the model has no global
+"outside" (the lobby and the victory modal then label it honestly).
+
+### Quotient worlds: the distance policy
+
+If one *place* on your surface has several 3D realizations that are genuinely
+different points (the antipodal pairs of `RP^2`, and not the Klein bottle's
+sheets, which land on the same point), plain Euclidean distance is wrong. Put
+
+```python
+placement={"distance_mode": "orbit_min", ...}
+```
+
+in the `@register_map(...)` call: the detector, the victory check, marker
+measurement, the pointer, obstacle collision/vision and the exit placement then
+all minimise over the chart copies. Every other map keeps the default
+`euclidean` policy, so nothing else changes.
 
 ---
 

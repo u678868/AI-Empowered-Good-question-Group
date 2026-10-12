@@ -183,6 +183,16 @@ class WorldConfig:
     # Task 17: geometric scale S in [0.2, 10.0] and the difficulty tier.
     scale_factor: float = 1.0
     difficulty: str = "easy"
+    #: How the world measures distance between two places:
+    #:
+    #: * ``"euclidean"`` (default) -- plain ambient Euclidean distance between
+    #:   the two 3D realizations of the player and the target;
+    #: * ``"orbit_min"`` -- minimum over the chart copies of both places. A
+    #:   quotient world such as the real projective plane needs this, because a
+    #:   single place there has two antipodal 3D realizations and the honest
+    #:   distance is the nearer one. Every other map keeps the default, so its
+    #:   behaviour is bit-for-bit unchanged.
+    distance_mode: str = "euclidean"
 
     def __post_init__(self) -> None:
         if not isinstance(self.domain, Domain):
@@ -210,6 +220,10 @@ class WorldConfig:
             raise ConfigError("WorldConfig.difficulty must be one of easy/medium/hard")
         if self.max_placement_attempts < 1:
             raise ConfigError("WorldConfig.max_placement_attempts must be >= 1")
+        if self.distance_mode not in DISTANCE_MODES:
+            raise ConfigError(
+                f"WorldConfig.distance_mode must be one of {DISTANCE_MODES}, got {self.distance_mode!r}"
+            )
 
     @property
     def scaled_obstacle_radius(self) -> float:
@@ -220,6 +234,12 @@ class WorldConfig:
     def scaled_obstacle_safe_margin(self) -> float:
         """Task 17: start/exit clearance after the 1/S geometric scale."""
         return float(self.obstacle_safe_margin) / float(self.scale_factor)
+
+
+#: Supported distance policies; see :attr:`WorldConfig.distance_mode`.
+DISTANCE_EUCLIDEAN = "euclidean"
+DISTANCE_ORBIT_MIN = "orbit_min"
+DISTANCE_MODES = (DISTANCE_EUCLIDEAN, DISTANCE_ORBIT_MIN)
 
 
 def default_domain() -> Domain:

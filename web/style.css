@@ -54,6 +54,9 @@ main {
 }
 
 #god-panel { grid-column: 1 / -1; }
+/* Keep the privileged 3D view on one screen instead of stretching it across the
+   whole window; the backing store follows this CSS box (see drawGodView). */
+#god-canvas { max-width: 1000px; margin: 0 auto; }
 .hidden { display: none; }
 
 h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); font-weight: 600; }

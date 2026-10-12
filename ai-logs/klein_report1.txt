@@ -1,0 +1,209 @@
+================================================================================
+The Curved World — Task 17 报告
+（克莱因瓶关卡：不可嵌入、不可定向的封闭世界）
+文件：ai-logs/klein_report1.txt
+基线：origin/main = 604efa3（Task 16 合并后）
+================================================================================
+
+一、结论摘要
+--------------------------------------------------------------------------------
+1. 功能完成：新增第 5 张地图 klein_bottle。按既有插件规范注册，只新增一个
+   manifold 模型 + 一条注册项；世界生成器、探测器、信息边界主逻辑未改动。
+2. 诚实性：克莱因瓶**不可能嵌入 R³**，本关提供的是**浸入**（figure-8 immersion）。
+   自交、不可定向、无全局"外侧"三条事实全部在代码、README 与测试中如实标注，
+   没有用特判把它们藏起来。
+3. 工程重点：该 chart 的平移周期不是 (2pi, 2pi)。r(u + 2pi, v) = r(u, -v)，
+   即 u 平移 2π 会**镜像 v**而非回到原点。若沿用旧的 wrap_parameter 独立折回，
+   玩家每跨一次缝整张局部图就会镜像一次（可见穿帮）。本任务把"chart 如何识别
+   自己的点"收敛成 manifold 的公开接口，各层只查询、不假设。
+4. 测试：pytest 全量 **176 项通过**（基线 159 项 + 新增 17 项 Klein 专项测试）；
+   node --check web/app.js 通过；前端 chart 数学用 node 侧单测复核通过。
+5. 未提交/未推送：本轮只在本地工作区完成，未执行 git commit / push，
+   是否提交、提交到哪个分支由用户决定。
+
+二、模型（src/the_curved_world/manifold.py）
+--------------------------------------------------------------------------------
+新增 @dataclass(frozen=True) class KleinBottle(ClosedManifold)：
+
+    P(u, v) = R + t ( cos(u/2) sin v - sin(u/2) sin 2v )
+    Q(u, v) = t ( sin(u/2) sin v + cos(u/2) sin 2v )
+    r(u, v) = ( P cos u, P sin u, Q )                 # 默认 R = 90, t = 31
+
+  1) 解析微分几何：r_u / r_v / r_uu / r_uv / r_vv 全部解析求出，利用手推恒等式
+     P_u = -Q/2、Q_uu = -Q/4、Q_uv = P_v/2 化简；运行时不做任何数值差分。
+     实测误差：一阶 vs 中心差分 < 2.1e-8；二阶（h = 1e-4）< 2.4e-6。
+  2) __post_init__ 自检：72x72 网格上 E G - F^2 > 0；并在 4 个采样点上校验
+     r(u + 2pi, v) == r(u, -v)（把拓扑事实写进构造函数）。
+  3) sample_grid 覆写：上帝视角绘制 [0, 2pi]^2 基本域（端点为闭区间）。
+     该网格的 u=0 与 u=2pi 两条边曲线是同一条曲线按 v 反向
+     （r(0, -v) = r(2pi, v)），实测逐点重合，因此画面闭合。
+
+实测事实（seed 无关，纯几何）：
+
+  | 检查              | 结果                                                        |
+  | :---------------- | :---------------------------------------------------------- |
+  | 正则性            | min(E G - F^2) ~ 1.27e6，退化点比例 0（是真浸入）           |
+  | 自交              | r(u, 0) = r(u, pi) = (R cos u, R sin u, 0)，z=0 平面半径 R  |
+  |                   | 的圆被覆盖两次；两处法向不平行（|cos| < 0.999，横截）        |
+  | 不可定向          | n(u + 2pi, v) = -n(u, -v)，误差 ~2.8e-16                    |
+  | 高斯-博内         | chi = 0 -> iint K dA = 0；数值实测 0.0000                    |
+  | 表面积（数值）    | ~1.66e5                                                     |
+
+三、chart 周期与副本（本任务的核心改动）
+--------------------------------------------------------------------------------
+事实：r(u + 2pi, v) = r(u, -v)。因此 deck 群由
+    (u, v) -> (u + 2pi, -v)   和   (u, v) -> (u, v + 2pi)
+生成；其**平移子群**是 (4pi, 0) 与 (0, 2pi)，index = 2。也就是说：
+  - 平移 2π 不是恒等（会镜像 v），但平移 4π 是恒等；
+  - chart 是曲面的**双重覆盖**，每个曲面点在 chart 中有两份坐标。
+
+为此在 ClosedManifold 上新增/推广了一组接口，调用方一律查询 surface：
+
+  | 接口                 | 环面族            | 克莱因瓶                              |
+  | :------------------- | :---------------- | :------------------------------------ |
+  | chart_periods()      | (2pi, 2pi)        | (4pi, 2pi)                            |
+  | wrap(u, v)           | 独立折回 [-pi,pi) | 按 4pi/2pi 折回（纯平移，曲面不可见）  |
+  | chart_copies(u, v)   | 1 份              | 2 份：(u, v) 与 (u + 2pi, -v)          |
+  | chart_relative(...)  | 等价 wrap_difference | 在 2 份坐标中挑最近者              |
+
+改动点（均为"查询 surface 取代硬编码 2π"）：
+  1. src/the_curved_world/gameplay.py
+     - 删除 `from ...manifold import wrap_parameter`；
+     - _clamp 改为 surface.wrap(...)（周期性世界）。
+  2. src/the_curved_world/obstacles.py
+     - 新增 _wrap_point() / _relative_point()（有 wrap/chart_relative 就用，
+       否则退回原来的 wrap_parameter / wrap_difference，有界平面行为不变）；
+     - resolve_collision 的首次切向映射与回退循环改走上述两个助手。
+  3. src/the_curved_world/server.py
+     - 新增 _chart_payload()：输出 twisted / orientable / chart_periods；
+     - 注入 summary()、player_state()、sync_position() 响应与旋转-only 的
+       step_action 响应（纯几何字段，不含出口或真实距离）。
+  4. src/the_curved_world/maps/__init__.py
+     - MapMetadata 增加 non_orientable 字段，register_map 增加同名参数，
+       to_dict() 输出 non_orientable（JSON 安全，供大厅与结算弹窗标注）。
+  5. web/app.js
+     - 新增 chartPeriods() / isTwistedChart() / wrapToPeriod() / chartCopies()
+       / chartDelta()；relativeDelta(a, b, axis) 改为按公开周期折回；
+     - localize() 与 project() 改走 chartDelta（含翻转副本判定）；
+     - 硬碰撞 resolveHardCollisions 的位移、障碍中心、最终包裹全部按公开周期；
+     - topologyLabel() 对 non_orientable 地图显示
+       "closed periodic, non-orientable (immersed, self-intersecting)"。
+
+四、玩法与坐标实测
+--------------------------------------------------------------------------------
+1. world_config_for("klein_bottle")：
+   min_separation 60、detector_scale 45、obstacle_count 26、obstacle_radius 4.5、
+   obstacle_safe_margin 40。seeds 0..5 均生成满额 26 个障碍物，且每个障碍物到
+   出生点/出口的环境三维距离 >= 40（实测最小 40.74）。
+2. 连续移动（步长 0.25，seed 12345）：
+   - 沿 u / v / 对角各走 400 步：坐标始终在 [-2pi, 2pi) x [-pi, pi)，clamped 恒 False；
+   - 单步三维位移不超过 max|r_u| / max|r_v| * 步长（无瞬移）；
+   - 跨 u = ±2pi 缝时 wrap 前后三维坐标差 < 1e-9，且以 0.001 参数步长扫过缝口时
+     最大三维位移 0.0727 = |r_u| * 0.001（连续，无跳变）。
+3. 服务端实测：session.player_state() 与 sync_position() 对
+   (12.0, 3.0) 正确折回为 (-0.566371, 3.0)（= 12 - 4pi）；玩家端 payload 中
+   不含 exit / exit_position / true_distance / distance_to_exit。
+4. 前端 chart 数学用 node 侧脚本复核（提取 web/app.js 中的纯函数）：
+   环面保持原行为；有界平面不折回；克莱因瓶的翻转副本识别为零位移、
+   4π 平移识别为零位移、远处的点不会被"抄近路"拉近。
+
+五、诚实标注的固有边界（写在 README Task 17 小节与已知限制）
+--------------------------------------------------------------------------------
+1. 自交圆上两个**不同**的曲面点三维重合，因此按环境三维距离工作的探测器与
+   碰撞判据**无法区分**它们；signal = 1 当且仅当玩家位于出口的三维位置。
+2. 本关没有全局"外侧"：normal() 仍是解析给出的局部法向，但沿 u 环绕一周会反向。
+3. 自交圆两侧各约 0.074 的薄带（精确值 (障碍半径 + 玩家半径) / (t * sqrt(5))，
+   两个带合计约占 v 周期的 4.7%）内，另一支曲面上的障碍物满足后端碰撞判据，
+   而前端按局部 chart 把它画在视口之外。因此该薄带内"看不见却被挡 / 穿过去"
+   是可能的。这是自交浸入模型在 R³ 中的固有边界，本版如实标注，不做特判。
+
+六、测试（tests/test_klein_bottle.py，17 项）
+--------------------------------------------------------------------------------
+  1. 浸入处处正则（min > 0、退化比例 0）
+  2. 非法参数被拒（R <= 0 / t <= 0）
+  3. 一阶解析偏导 vs 中心差分
+  4. 二阶解析偏导 vs 中心差分
+  5. 平移 2π 镜像 v 而非恒等；公开周期为 (4pi, 2pi)
+  6. 自交圆真实存在：r(u,0) = r(u,pi) = (R cos u, R sin u, 0)，且切平面横截
+  7. 法向沿 u 环绕反向：n(u + 2pi, v) = -n(u, -v)
+  8. 模型自述：periodic / orientable=False / twisted=True / chi=0
+  9. 高斯-博内：iint K dA = 0
+ 10. wrap 保持三维点不变且落在公开窗口内
+ 11. wrap 跨缝连续（扫过缝口无跳变）
+ 12. chart_relative 找得到翻转副本，且不会把远处的点拉近
+ 13. 环面族保持 (2pi, 2pi) 与单副本（回归保护）
+ 14. 地图已注册、元数据 non_orientable=True、构造出 KleinBottle
+ 15. 四个种子下障碍物满额且与出生点/出口保持安全边距
+ 16. 沿三个方向各走 400 步：无瞬移、不 clamped、坐标在公开窗口内
+ 17. 玩家 API 信息边界（含 god 模式才放行 debug_state）
+
+全量：176 passed（基线 159 + 新增 17）。
+
+七、文件清单
+--------------------------------------------------------------------------------
+修改：
+  src/the_curved_world/manifold.py      （KleinBottle + chart 识别接口）
+  src/the_curved_world/gameplay.py      （_clamp 走 surface.wrap）
+  src/the_curved_world/obstacles.py     （接缝包裹走 manifold 接口）
+  src/the_curved_world/server.py        （_chart_payload）
+  src/the_curved_world/maps/__init__.py （non_orientable 元数据）
+  src/the_curved_world/maps/builtin.py  （klein_bottle 注册）
+  web/app.js                            （周期/副本感知的相对包裹与标注）
+  tests/test_map_registry.py            （内置地图列表 + 不同曲面类计数）
+  tests/test_server.py                  （/api/maps 列表）
+  tests/test_obstacle_scale.py          （新增地图的半径回归）
+  README.md、docs/architecture.md、docs/contributing_extensions.md、DEMO_LINK.md
+新增：
+  tests/test_klein_bottle.py
+  ai-logs/klein_report1.txt（本文件）
+
+八、复现命令
+--------------------------------------------------------------------------------
+  .\.venv\Scripts\python.exe -m pytest
+  .\.venv\Scripts\python.exe -m src.main --serve --map klein_bottle --debug
+  .\.venv\Scripts\python.exe -m src.main --play  --map klein_bottle --seed 12345
+
+九、追加修复：上帝视角未随地图切换刷新（用户反馈）
+--------------------------------------------------------------------------------
+症状：上帝视角已打开时从大厅换图，3D 面板仍显示上一张地图的网格 —— 换成克莱因瓶后
+      看起来"克莱因瓶的 3D 图没有绘制"。
+
+根因（web/app.js）：
+  setGodView(visible) 在 Boolean(visible) === Boolean(state.godVisible) 时直接
+  drawGodView() 重绘**缓存**的 state.debugState，从不重新 GET /api/state/debug；
+  而 /api/session/new 已经重建了世界。
+
+定位方法（无头 Edge + 页面内诊断，全部在临时目录，未污染仓库）：
+  1) 打开 god 画布并读取像素：统计非背景像素数与包围盒；
+  2) 用同一 payload 复算 drawGodView 的投影包围盒，与实测包围盒对比；
+  3) 复现用户操作流：先以 god 模式进入 planar_landscape，再从大厅切到 klein_bottle。
+  结果（修复前）：
+    step1 期望包围盒=154,605,179,340  实测=155,604,179,340  像素=37093
+    step2 当前会话=figure-8 Klein bottle，期望=221,535,187,329
+          实测=155,604,179,340  像素=37093   ← 与 step1 逐位相同，画布根本没重绘
+
+修复：
+  - 新增 refreshGodView()：总是重新请求 /api/state/debug 后再重绘；
+  - setGodView() 在"已是目标状态且可见"时也调用 refreshGodView()；
+    toggleGodView() 复用同一函数；
+  - enterWorld() 重建世界时清空 state.debugState，杜绝陈旧网格被重绘。
+
+顺带修正的可见性问题（否则会出现"画了但看不见"）：
+  - drawGodView 原来用画布固定的 760x520 属性尺寸绘制，再由 CSS 拉伸到面板宽度
+    （宽屏约 1400px）→ 明显模糊；改为 frameCanvas(canvas)，按 CSS 尺寸 × DPR 绘制；
+  - 画布宽高比 1.46 且占满整行，导致面板高达约 950px、3D 图基本在屏幕外：
+    属性改为 1000x500（2:1）并加 CSS #god-canvas { max-width: 1000px; margin: 0 auto; }；
+  - 投影填充系数 0.42 -> 0.68（FILL 常量）：|rx| <= 0.5*(|cos|+|sin|) <= 0.707，
+    因此 0.68 在任何 yaw 下都不会裁切曲面，同时把曲面占画布宽度从约 42% 提到约 68%；
+  - 打开上帝视角时 scrollIntoView({block:'start'})（瞬时），按下 G 立即可见。
+
+回归验证（无头 Edge，窗口 1600x1000）：
+  planar_landscape -> klein_bottle 切换后，实测包围盒 = 当前会话期望包围盒
+  = 163,832,136,358；scrollY = maxScroll；god canvas css = 1000x500；
+  node --check web/app.js 通过；pytest 176 项全通过。
+
+十、本节的文件清单增补
+--------------------------------------------------------------------------------
+修改：web/app.js（refreshGodView / FILL / frameCanvas / scrollIntoView）、
+      web/index.html（god-canvas 1000x500）、web/style.css（#god-canvas 规则）、
+      README.md（Task 17 修正小节）、ai-logs/klein_report1.txt（本节）。
