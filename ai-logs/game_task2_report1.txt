@@ -1,0 +1,278 @@
+================================================================================
+The Curved World — Task 19 报告
+（process/game_task2.txt：出口探测器封印 / 标记桩 / 有限绳索系统 /
+  复合量具 Ruler & Protractor / 学院任务书）
+文件：report/game_task2_report1.txt
+日期：2026-10-12
+状态：本地完成；按项目规范【未 commit、未 push】（等待用户指令）
+================================================================================
+
+一、任务目标
+--------------------------------------------------------------------------------
+1. 重构底栏 5 槽：Exit Detector / Marker Peg / Surveyor Rope / Measure Tool / Quest Codex；
+2. 探测器封印：未集齐几何印记时严格锁死（无信号、无趋势、使用提示），完成后恢复；
+3. 有限绳索系统：总长 100 m、单段上限 30 m，支持标记/视距内障碍物之间的绑扎与回收；
+4. 复合量具：Ruler 测距、Protractor 测角/测内角和，命中 Quest 1 阈值即触发推导报告；
+5. 学院任务书弹窗：#codex-modal（任务总览、印记栏、隐秘提示）。
+
+二、后端改动
+--------------------------------------------------------------------------------
+1. src/the_curved_world/ropes.py（新增）
+   - RopeNode(kind, id, label, uv, position_3d)：端点仅允许 marker / obstacle；
+   - Rope(id, node_a, node_b, length_3d, is_obstacle_a/b)；
+   - RopeSystem(max_segment=30, total_pool=100)：重复/自连校验、环境三维距离计算、
+     单段超长（"rope too short"）与绳池不足（"rope pool exhausted"）阻断、
+     剪断/全清并回收长度、to_list()/state_payload()。
+
+2. src/the_curved_world/gameplay.py
+   - ExplorationGame 持有 RopeSystem，暴露 rope_system / rope_remaining /
+     connect_rope / clear_ropes / rope_state（RopeError 统一转为 GameError）；
+   - detector_locked 属性 = 任务未集齐印记；_detector_silent() 在封印时返回中立读数，
+     使 read_detector / peek_detector / 标记点都不携带距离信息。
+
+3. src/the_curved_world/server.py
+   - /api/state/player 增加 detector_locked、ropes、rope_remaining、rope_used、
+     rope_total、rope_max_segment；move / sync_position 增加 detector_locked 与 rope_state；
+   - /api/action/tool 新增：
+     * rope_connect：{from_type, from_id, to_type, to_id}，障碍物端点必须存在于
+       当前视距内（_visible_obstacles_now），否则拒绝（防止探测未探索区域）；
+     * rope_clear：{rope_id} 或空（全部剪断）；
+     * measure：{mode: "ruler"|"protractor", targets: [...]}：
+       - ruler：一条绳索 → 实测长度；两个节点 → 两点距离；
+       - protractor：3 个标记 → 三角形内角和（并联动 Quest 1 判定 + 推导 payload）；
+         两根共节点绳索 → 夹角；三根闭合绳索 → 三角形内角和（同样联动任务状态）。
+   - scan 工具在封印时返回 signal 0.0 / label "Sealed" / trend "same" / locked true；
+   - 难度优先级：Medium/Hard 仍返回 Offline/Reserved（其"静默"独立于封印）。
+
+三、前端改动
+--------------------------------------------------------------------------------
+1. 底栏与模式
+   - 5 槽纯英文：Exit Detector / Marker Peg / Surveyor Rope / Measure Tool / Quest Codex；
+   - 槽位 1 在 detector_locked 时 .locked（置灰 + 锁链图标），点击给出封印提示；
+   - 槽位 4 显示 [Ruler | Protractor] 胶囊，R 键或按钮切换；
+2. 绳索交互（web/app.js）
+   - drawRopes：按周期相对坐标绘制紧绷细缆（暗色底 + 金色缆线 + 端点绑扎环 + 长度标签）；
+   - 节点命中表（标记桩 + 视距内障碍物）支持悬浮高亮；选中第一个节点后绘制虚线橡皮筋；
+   - 点击第二个节点调用 rope_connect；点击已有绳索或按 C 剪断并可回收绳长；
+3. 复合量具
+   - Ruler：点击绳索实测长度，或依次点击两个节点测距；
+   - Protractor：依次点击 3 个标记桩测内角和（命中阈值时弹出 #proof-modal），
+     后端也支持两绳夹角与三绳闭合三角；
+4. 学院任务书（#codex-modal）
+   - 羊皮纸风格面板：Active Quest 标题/说明、隐秘学派提示、进度百分比、Relics 栏；
+   - 点击槽位 5 或按 J 开合；Esc 关闭。
+
+四、测试与验证
+--------------------------------------------------------------------------------
+1. 全量 pytest（182 项 = 原 173 + 新增 9）：
+   命令：.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
+   结果：exit 0；72 + 72 + 38 = 182 个点全部通过。
+   新增 tests/test_ropes_and_tools.py：
+   - RopeSystem 三类端点组合（标记↔标记、标记↔障碍、障碍↔障碍）与长度/回收；
+   - 超长单段（>30 m）与绳池耗尽拒绝；
+   - GameSession 绳索连接、Ruler 单绳/双节点测距；
+   - 未知标记、不可见障碍物、自连端点拒绝；
+   - Protractor 三根闭合绳索测内角和并回传任务状态；
+   - Protractor 三标记参考三角形完成 Quest 1 并授予 Curvature Seal；
+   - 未完成任务时探测器严格封印（signal 0 / Sealed / locked），完成后恢复真实信号；
+   - 绳索 payload 仅含玩家已知节点且不含 exit_position / true_distance。
+   为适配"封印优先"的新语义，test_server.py::test_move_payload_shape 的探测器标签断言
+   更新为允许 "Sealed" 并新增 detector_locked 断言（唯一被修改的既有测试）。
+
+2. 前端：node --check web\app.js 通过；web/{index.html,app.js,style.css} 无中文字符。
+
+3. 浏览器端到端（.\.venv\Scripts\python.exe -m src.main --serve --port 8123 --debug）：
+   a) 底栏显示 Exit Detector 🔒 / Marker Peg / Surveyor Rope / Measure Tool / Quest Codex；
+      槽位 1 类名含 locked，HUD 显示 [Exit Detector Sealed - complete the geometric trials]，
+      探测器 "signal 0.0000 (Sealed, same)"，点击槽位给出封印提示；
+   b) 槽位 5 打开学院任务书：标题 "Gauss-Bonnet Angle Excess"、隐秘提示文案、
+      Relics "none yet"，Close Codex 正常关闭；
+   c) 槽位 2 放置标记桩得到 A/B/C 命名；
+   d) 槽位 3 点击 A 与 B 成功绑扎："Rope #0 tied: 29.85 m (remaining 70.15 m)"；
+   e) 槽位 4 Ruler 点击该缆线："Rope #0 length: 29.852 m"；R 切换到 Protractor 后
+      依次点击 A/B/C："Angle sum A / B / C = 180.01 deg (excess 0.01 deg)"；
+   f) 截图 temp/task19_ropes.jpg 中金色缆线/节点像素 719 px、377 个量化颜色，
+      浏览器控制台无报错。
+
+五、设计说明与限制
+--------------------------------------------------------------------------------
+1. 绳索长度采用端点间的环境三维直线距离（Rope.length_3d，符合规范定义的字段）；
+2. 在默认环面（ring 130）上，单段 30 m 只能覆盖很小的参数窗口，因此三根绳索构成的
+   闭合小三角形角盈约 0.01 度，无法达到 Quest 1 的 186.4 度目标；这是"有限绳索"与
+   超大流形尺度共同决定的诚实结果。Quest 1 的完成路径为 Protractor + 3 个标记桩
+   （规范允许"或 3 个闭合相连的标记点构成的三角形"），后端测试已覆盖该完成流程；
+3. 障碍物端点必须在当前视距内，服务端显式校验，避免通过绳索长度探测未探索区域；
+4. 学院任务书与推导弹窗只展示任务/几何信息，不含出口坐标或真实距离；
+5. 动画仍为规范要求的占位级几何动画。
+
+六、Git 状态与建议
+--------------------------------------------------------------------------------
+- 本任务改动与 Task 17、Task 18 的改动目前都还在工作区，未 commit / 未 push；
+- 建议提交信息：
+  feat(tools): survey rope system, dual measurement tool, locked detector and quest codex
+- 建议提交顺序（原子化）：Task 17 缩放/难度 → Task 18 任务引擎 → Task 19 工具链；
+  分支可从已推送的 codex/task16-packaging 继续叠加，或等 main 合并后新建 codex/task19-tools；
+  合并由用户在 GitHub 手动完成，Codex 不推 main、不使用 --force。
+================================================================================
+
+================================================================================
+补充记录（Task 19 返工：界面精简 / Bug 修复 / 绳索与量具易用性）
+追加时间：2026-10-12（本报告为追加记录，不删除既有内容）
+================================================================================
+
+一、本轮清理
+1. 删除右侧遗留工具栏（#toolbar）与结果卡（#tool-card）及其 JS（renderToolbar /
+   showCard / hideCard / describeTool / triangleCard / curvatureCard / pointerCard），
+   前端只保留底部 5 槽物品栏；pointer、curvature、goniometer 等旧右侧入口不再存在。
+2. runTool 精简为 scan / mark 两条路径（配合新量具），其余入口从 UI 移除。
+
+二、Bug 修复
+1. "任务未完成仍可用探测器"：根因是右侧遗留 "Compass scan" 按钮直接调用 runTool('scan')，
+   绕过了封印检查；删除该按钮后，使用槽位 1（点击地图/Space）会先检查 detector_locked，
+   命中封印即在左上角提示 "The exit detector is sealed ..."，服务端同样返回 label Sealed /
+   signal 0.0 / locked true；难度 Medium/Hard 的 Offline/Reserved 语义保持不变。
+2. 上帝模式操作一致性：移除 mouse-aim 与滚轮换槽中的 state.godVisible 早退，使上帝模式下
+   鼠标瞄准、滚轮换槽、工具点击与玩家模式完全一致（实测上帝模式下朝向随鼠标改变）。
+
+三、新增左上角提示区（#hint-box）
+- 无提示时 class="hint-box hidden"（不显示）；出现 绳长 / 夹角 / 三角形内角和 / 任务完成 /
+  探测器封印 / 绳长不足 等结果时显示，并按 ok/warn/error 变色，约 7 秒后自动隐藏。
+
+四、绳索与量具易用性返工
+1. 绳索（Slot 3）：按 3 直接进入绳索模式并提示 "Rope: select two path points."；
+   依次点击两个路径点（标记桩或视距内障碍物）后立即绑定并在 2D 地图渲染紧绷缆线；
+   每个路径点最多绑定两条绳索（服务端 RopeError 校验："A already binds two ropes"）；
+2. 量具（Slot 4）：改为 Length / Angle 两档（R 键或胶囊按钮切换）：
+   - Length：点击绳索 → 提示区显示该缆线长度（实测 "Rope #0 length: 29.619 m."）；
+   - Angle：点击一个恰好连接两条绳索的路径点 → 提示区显示该处夹角；若两条绳索与第三条
+     绳索闭合，则同时给出三角形内角和并联动 Quest 1 判定；若该点不足两条绳索，
+     提示 "needs exactly two ropes"，也支持依次点击 3 个标记桩走三角形内角和路径；
+3. 服务端 measure 新增 mode="angle"（单一路径点目标），保留 ruler / protractor 兼容路径。
+
+五、本轮验证
+1. pytest：184 项全部通过（新增 test_path_point_binds_at_most_two_ropes 与
+   test_angle_mode_measures_a_closed_rope_triangle 两项）；
+2. node --check web/app.js 通过；web/* 无中文；浏览器控制台无报错；
+3. 浏览器实测：
+   - #toolbar / #tool-card 均为 0 个元素（已删除）；
+   - 初始 #hint-box = "hint-box hidden"；
+   - 点击锁定探测器（槽 1 + 地图）→ 提示区显示封印文案，class "hint-box warn"；
+   - 槽 3 提示 "Rope: select two path points."，两名路径点后提示
+     "Rope #0 tied: 29.62 m (remaining 70.38 m)."；
+   - 槽 4 默认 Length，点击缆线提示 "Rope #0 length: 29.619 m."；
+   - R 键切换 Angle 后按钮 active，点击仅一条绳索的路径点提示
+     "Angle (triangle): 1/3 markers selected."（进入三标记三角形路径）；
+   - 上帝模式下面板打开且鼠标瞄准仍生效（朝向随点击改变）。
+
+六、仍然存在的平衡问题
+- 单段 30 m 在默认环面（ring 130）上只能构成很小的局部三角形（角盈约 0.01 度），
+  无法达到 Quest 1 的 186.4 度目标；若要能用"三绳闭合三角形"完成该任务，需要把
+  L_max / L_total 调到该地图尺度的量级（例如数百米）。当前仍可用"3 个标记桩"路径完成。
+================================================================================
+
+================================================================================
+补充记录（Task 19 返工二次修复：陈旧服务进程导致的 unknown_tool / 探测器未封印）
+追加时间：2026-10-12（追加记录，不删除既有内容）
+================================================================================
+
+现象：
+1. 使用绳索提示 unknown tool（'rope_connect'）；
+2. 任务未完成时右侧探测器仍返回真实 signal / Weak。
+
+排查与根因（已在终端复现确认）：
+- 本机 8000 端口当时存在两个**陈旧服务进程**（PID 27528 / 55220），其 Python 代码是
+  Task 18 时期版本：
+    * GET /api/state/player 不含 detector_locked / ropes / rope_remaining（有 quest）；
+    * signal=0.137798 / label=Weak（未封印）；
+    * POST /api/action/tool {"tool":"rope_connect",...} 返回 400
+      {"error": "unknown tool 'rope_connect'"}。
+- 浏览器静态文件每次请求都从磁盘读取（因此前端是新的），但后端是旧进程 → 出现
+  "新前端 + 旧后端" 的组合：前端发送 rope_connect，旧后端不认识；旧后端不返回
+  detector_locked，前端因此认为探测器未被封印 → 两个现象完全吻合。
+
+修复动作：
+1. 结束 8000 端口上的所有陈旧监听进程（PID 27528、55220）；
+2. 用当前代码重新启动 8000 服务（隐藏窗口）：
+   .venv\Scripts\python.exe -m src.main --serve --port 8000 --debug
+3. 重新验证：
+   - GET /api/state/player → detector_locked=True、ropes=[]、rope_remaining=100.0、
+     label=Sealed、signal=0.0；
+   - POST rope_connect（无标记时）→ 400 {"error": "unknown marker 'A'"}，
+     证明已进入绳索分支（不再是 unknown tool）；
+   - 浏览器（http://127.0.0.1:8000/?v=task19fix）：
+     #toolbar 元素数 0；探测器读数 "signal 0.0000 (Sealed, same)"；
+     点击封印探测器 → 左上角提示 "The exit detector is sealed by the academy geometric
+     trial. Complete the quests to unlock it."；控制台无报错。
+
+结论：本轮两个 bug 均为**陈旧后端进程**导致，并非前端变量名不一致；代码本身已正确。
+注意：浏览器可能缓存旧 app.js，请在浏览器按 Ctrl+F5 强制刷新后再验证（或使用带 ?v=... 的地址）。
+仍存在一个未启动的遗留进程对（PID 51820/53316，2026-10-11 21:17 启动）不监听任何端口，
+本次未处理。
+================================================================================
+
+================================================================================
+补充记录（Task 19 三次修复：绳索长度 300m/100m 与右键确认断绳）
+追加时间：2026-10-12（追加记录，不删除既有内容）
+================================================================================
+
+一、绳索长度调整
+- DEFAULT_MAX_SEGMENT: 30.0 -> 100.0（单段上限 100 m）
+- DEFAULT_TOTAL_POOL:   100.0 -> 300.0（总长度池 300 m）
+- 原因：默认环面 ring 130 的地图尺度很大，原来 30 m 单段只能围出极小局部三角形；
+  调整后参考三角形（边长约 80-98 m）可以用 3 根绳索闭合，使"三绳闭合三角形"路径
+  也有可能推进 Quest 1 判定。
+- /api/state/player 的 rope_max_segment / rope_total / rope_remaining 同步为 100 / 300 / 300。
+
+二、断绳操作修复
+- 现象：在已经连接过绳子的路径点上再次左键点击，会把前一条绳子剪断。
+- 根因：左键在"选点连接"与"剪断绳索"之间共用了同一个处理分支（nearestRope 命中即 cut）。
+- 修复：
+  1. 左键只做"选取路径点 / 连接两个路径点"，不再剪断任何绳索；
+  2. 剪断改为**右键点击绳索本身**：提示区显示
+     "Cut rope #N? Press y to confirm, n to cancel."（该提示为 sticky，不自动消失）；
+  3. 按 y 执行剪断并回收长度，按 n 或 Esc 取消；
+  4. C 键改为"请求全部剪断"，同样需要 y/n 确认；切换工具/进入新世界会取消待确认状态。
+
+三、本轮验证
+- pytest：185 项全部通过（新增 test_default_rope_limits_fit_the_large_maps；
+  test_overlong_marker_pair_is_rejected_on_the_server 改为沿环方向取 >120 m 的远端对）；
+- node --check web/app.js 通过；web/* 无中文；浏览器控制台无报错；
+- 服务端复核：新会话 player_state 返回 rope_max_segment=100、rope_total=300、
+  rope_remaining=300、detector_locked=True、label=Sealed；
+- 浏览器复核（8000，强刷后）：左键连续点击已连接点不再断绳；右键点击绳索弹出
+  y/n 确认提示，按 y 后绳索消失并回收长度，提示 "Rope #N cut (remaining ... m)."。
+================================================================================
+
+================================================================================
+补充记录（Task 19 四次修复：三角形必须测满三角 / 探测器解锁刷新）
+追加时间：2026-10-12（追加记录，不删除既有内容）
+================================================================================
+
+问题 1：只测量三角形的一个角度就完成了任务。
+- 原因：mode="angle" 在服务端一次性返回了闭合三角形的完整内角和并直接做 Quest 1 判定。
+- 修复：
+  * 服务端 mode="angle" 现在只返回**该顶点**的夹角（kind=node_angle，附 far_nodes / ropes）；
+  * 新增服务端 mode="angle_sum"（三个路径点目标）：只有客户端把闭合三角形的三个顶点都测完
+    才会请求该接口，得到内角和并触发 Quest 1 判定与推导弹窗；
+  * 客户端 Angle 模式维护 state.angleMeasurements：每测一个顶点提示
+    "Angle at A: 17.15 deg (1/3 vertices measured)." → "(2/3 ...)" → 第三次测完才汇总
+    并弹出推导报告。
+- 验证（浏览器全流程，seed 12345 参考三角形，三边 95.70 / 28.88 / 97.61 m）：
+  "Angle at A: 17.15 deg (1/3 vertices measured)." →
+  "Angle at B: 85.18 deg (2/3 vertices measured)." →
+  "Quest complete - the Curvature Seal is yours!"（仅第三次后完成）；
+  pytest 同步更新为 test_angle_mode_returns_one_vertex_and_angle_sum_needs_three。
+
+问题 2：任务完成后出口探测器仍无法使用。
+- 原因：客户端只在 refreshState / sync_position 时更新 detector_locked；通过量具完成任务时
+  客户端仅合并了 quest 字段，detector_locked 仍是旧值 true，Slot 1 仍被前端拦截。
+- 修复：
+  * 新增 syncDetectorLock()：只要 quest payload 带 exit_sealed，就用它同步 detector_locked；
+  * 在 applySnapshot、印记增加（maybeShowQuestProof）与两类任务完成分支中调用；
+  * 任务完成后额外 await refreshState()，立即拉取真实 signal/label 并刷新 HUD。
+- 验证：完成任务后 Slot 1 类名由 "slot locked" 变为 "slot"（锁链图标消失）；重新加载已完成
+  会话时 HUD 显示 "signal 0.0090 (Weak, first)"，点击槽位 1 可正常扫描；
+  服务端 /api/state/player 返回 detector_locked=False、label=Weak、signal=0.009。
+
+测试：pytest 185 项全部通过；node --check web/app.js 通过；web/* 无中文；控制台无报错。
+================================================================================

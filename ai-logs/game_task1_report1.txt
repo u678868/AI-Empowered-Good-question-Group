@@ -1,0 +1,132 @@
+================================================================================
+The Curved World — Task 18 报告
+（process/game_task1.txt：几何印记任务框架 / 流形可行性扫描器 /
+  Quest 1 Gauss-Bonnet 角盈测定 / 推导弹窗占位）
+文件：report/game_task1_report1.txt
+日期：2026-10-12
+状态：本地完成；按项目规范【未 commit、未 push】（等待用户指令）
+================================================================================
+
+一、任务目标
+--------------------------------------------------------------------------------
+1. 流形可行性扫描：31x31 参数粗扫描，缓存 K 极值、K 符号反转带、亏格，并按
+   "任务必须可完成" 原则给出带宽裕度的自适应阈值；
+2. 任务引擎脚手架：GeometricQuest 基类 + QuestManager（按种子确定性抽选任务链、
+   维护 active/completed/relics 与出口封印）；
+3. Quest 1：Gauss-Bonnet Angle Excess —— 用 3 个标记 + 测角仪测内角和，达到
+   自适应目标即授予【曲率之钥 Curvature Seal】；
+4. 推导展示弹窗 #proof-modal + #proof-canvas 占位几何动画 + 任务追踪 HUD。
+
+二、改动文件与功能
+--------------------------------------------------------------------------------
+1. src/the_curved_world/scanner.py（新增）
+   - ManifoldFeatures：k_max/k_min/k_mean、has_parabolic_line、genus、closed、
+     euler_characteristic、peak、metric_scale、reference_radius(_world)、
+     reference_angle_sum、reference_excess；
+   - scan_manifold(manifold, samples=31, genus_hint=...)：参数网格扫描 +
+     area_element 加权求数值 Gauss-Bonnet 总曲率；亏格优先采用地图元数据，
+     否则用 chi=total/(2pi) 估计；
+   - 参考三角形：在正曲率峰值处，取"物理半径约 8 单位、且不超过参数域 15%"
+     的等边三角形，用与游戏测角仪相同的 tangent_angle 例程测其内角和，
+     得到可达角盈 reference_excess（按 cache_key 缓存，避免重复扫描）。
+
+2. src/the_curved_world/quest.py（新增）
+   - TriangleMeasurement / QuestResult / GeometricQuest（抽象基类）；
+   - GaussBonnetQuest：is_applicable（k_max>0 且 reference_excess>0）、
+     target_value（自适应阈值）、evaluate（进度 + 完成判定 + 推导 detail）；
+   - QuestManager：确定性任务链（rng.permutation）、可用性过滤、active/completed/
+     relics、出口封印（exit_sealed/exit_unlocked）、seal_contact、last_proof、
+     state_payload() / completion_payload()；chain 属性便于确定性测试。
+
+3. src/the_curved_world/maps/__init__.py、maps/builtin.py
+   - MapMetadata 新增 genus 字段并写入四张地图（环面 1、椭球 0、双孔 1、有界平面 None）；
+   - to_dict 输出 genus，供扫描器作为权威亏格提示。
+
+4. src/the_curved_world/gameplay.py
+   - ExplorationGame 新增可选 quest_manager；
+   - quest_state() / evaluate_triangle_measurement()；
+   - _update_victory()：未集齐印记时即使站在出口也不置 won，并置 seal_contact；
+     完成任务瞬间重新判定（可立即胜利）。
+
+5. src/the_curved_world/server.py
+   - _build()：世界生成后 scan_manifold（带地图 genus 提示）+ QuestManager 挂载；
+   - /api/state/player、/api/action/move、/api/action/sync_position 增加 quest 字段；
+   - /api/action/tool 的 angle_sum/triangle：附带 quest_completed 与 proof。
+
+6. web/index.html、web/style.css、web/app.js
+   - 右侧新增 #quest-tracker（标题、描述、Angle Sum: current/target 进度条、提示、
+     印记列表、Exit sealed 警示）；
+   - 新增 #proof-modal（标题 + #proof-canvas + 5 步推导列表 + Accept Seal 按钮）；
+   - #proof-canvas 独立 requestAnimationFrame 循环：呼吸膨胀的发光测地三角形、
+     外凸曲边、顶点弧度扫描、起伏网格背景；关闭时 cancelAnimationFrame；
+   - 收到 quest_completed 或检测到印记数量增加（relics + last_proof）时弹出推导弹窗；
+     任务追踪 HUD 随玩家状态实时刷新。
+
+三、自适应阈值设计（关键）
+--------------------------------------------------------------------------------
+- 参考角盈 dtheta_ref = 峰值处可达参考三角形的 (内角和 - 180deg)；
+- theta_target = 180deg + clamp(0.6*dtheta_ref,
+      min(20deg, 0.5*dtheta_ref), min(80deg, 0.85*dtheta_ref))，
+  并再次限制 <= 0.95*dtheta_ref；
+- 因此恒有 180deg < theta_target < 180deg + dtheta_ref，且参考三角形本身必然达标，
+  满足"阈值严格大于 180deg 但小于理论物理极值、严禁卡死"的规范要求；
+- 实测目标：torus_genus1 186.40deg（参考 10.67deg）、planar_landscape 183.00deg、
+  double_torus 215.54deg、ellipsoid_genus0 260.00deg。
+
+四、测试与验证
+--------------------------------------------------------------------------------
+1. 全量 pytest（173 项 = 原 167 + 新增 6）：
+   命令：.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
+   结果：exit 0；进度 72 + 72 + 29 = 173 个点全部通过。
+   新增 tests/test_quest_engine.py：
+   - 扫描器对环面/椭球/有界平面的特征提取（K 极值、符号反转、亏格、缓存）；
+   - 自适应阈值始终落在 (180deg, 180deg + dtheta_ref) 且参考三角形必达标；
+   - QuestManager 完成并授予 Curvature Seal；
+   - 不适用任务被过滤、任务链按种子确定性；
+   - 出口封印：未完成时站在出口 won=False 且 seal_contact=True；完成后解除封印并可胜利；
+   - 任务/推导 payload 不含 exit_position / true_distance。
+
+2. 前端语法与规范：
+   node --check web\app.js 通过；web/{index.html,app.js,style.css} 无中文字符。
+
+3. 浏览器端到端（.\.venv\Scripts\python.exe -m src.main --serve --port 8123 --debug）：
+   a) 进入 torus_genus1 / seed 12345 / Easy 后，任务 HUD 显示
+      "Gauss-Bonnet Angle Excess"、"Angle Sum: - / 186.4 deg"、数理提示与
+      "Exit sealed - a geometric relic is missing."（0 seals）；
+   b) 通过真实服务端测角工具路径完成参考三角形：
+      quest_completed=True，内角和 190.67deg，proof.relic="Curvature Seal"，共 5 步推导，
+      quest.relics=["Curvature Seal"]、exit_sealed=False；
+   c) 刷新页面后前端由 relics+last_proof 自动弹出 #proof-modal：标题
+      "Gauss-Bonnet Angle Excess"，5 步推导含
+      "Measured interior angle sum: 190.67 deg (excess 10.67 deg)" 与
+      "Adaptive target: 186.40 deg (reference peak excess 10.67 deg, safety-clamped)"；
+      任务 HUD 变为 "1 seal" / "Relics: Curvature Seal"，封印警示隐藏；
+      点击 Accept Seal 后弹窗关闭；
+   d) 截图 temp/task18_proof.jpg 的像素统计：黄色发光边 593 px、蓝色辉光 5929 px、
+      238 个量化颜色，说明 #proof-canvas 动画确有内容；浏览器控制台无报错。
+
+五、信息边界与合规
+--------------------------------------------------------------------------------
+- 任务与推导只使用：曲率极值、亏格、参考角盈、玩家自己放置的标记与测角结果；
+- 扫描器不向玩家暴露峰值参数坐标（peak 仅服务端内部使用，to_dict 不含它）；
+- 不泄露出口三维坐标、真实距离或出口参数坐标；未完成任务时出口不可通关；
+- Web 文案保持纯英文；未修改 AGENTS.md、screenshots/、demo/、submission/ 等隔离区。
+
+六、已知限制
+--------------------------------------------------------------------------------
+1. 当前仅实现 Quest 1；任务池与过滤机制已就绪，后续任务可直接实现 GeometricQuest 接入；
+2. reference_excess 用与游戏测角仪一致的切线平面角度例程测量（而非纯解析上界），
+   目的是保证阈值一定可达；推导文案已如实说明其近似性质；
+3. #proof-canvas 为规范要求的占位动画（呼吸三角形 + 顶点弧度扫描），不是真实测地积分演示；
+4. 自动化浏览器导航在后台标签页曾受 rAF 降频与障碍物阻挡影响，未能在 UI 内完整"走"出
+   参考三角形；因此完成路径由真实服务端工具调用 + 前端状态回放共同验证，
+   建议用户在本机聚焦窗口手动体验一次完整流程。
+
+七、Git 状态与建议
+--------------------------------------------------------------------------------
+- 本任务全部改动在工作区，未 commit / 未 push（AGENTS.md 第 5 节：仅按指令推送）；
+- 建议提交信息：
+  feat(quest): quest engine scaffolding, manifold scanner, gauss-bonnet quest and proof modal shell
+- 如需推送分支，建议从已推送的 codex/task16-packaging 继续叠加，或等 main 合并后新建
+  codex/task18-quest-engine；合并由用户在 GitHub 手动完成，Codex 不推 main、不使用 --force。
+================================================================================

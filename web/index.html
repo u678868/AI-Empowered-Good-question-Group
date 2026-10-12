@@ -24,6 +24,7 @@
     <section class="panel viewport">
       <h2>Local Tangent Map - seamless top-down view</h2>
       <canvas id="map-canvas" width="720" height="540"></canvas>
+      <div id="hint-box" class="hint-box hidden"></div>
       <p class="hint">
         The player is pinned to the centre. The grassland scrolls forever because everything is
         drawn from wrapped parameter deltas, so crossing the periodic seam never tears or jumps.
@@ -31,13 +32,28 @@
       </p>
       <p class="hint">
         <kbd>W</kbd>/<kbd>A</kbd>/<kbd>S</kbd>/<kbd>D</kbd> run &middot; move the mouse over the map to aim &middot;
-        <kbd>Q</kbd>/<kbd>E</kbd> turn &middot; <kbd>1</kbd>-<kbd>5</kbd> pick a hand tool (or scroll) &middot;
-        <kbd>Space</kbd> / click uses it &middot; <kbd>G</kbd> god view (debug) &middot; <kbd>Esc</kbd> closes it.
-        Uphill ground slows you down; trees and rocks are hard, solid discs.
+        <kbd>Q</kbd>/<kbd>E</kbd> turn &middot; <kbd>1</kbd>-<kbd>5</kbd> pick a tool:
+        <b>1</b> Exit Detector, <b>2</b> Marker Peg, <b>3</b> Surveyor Rope, <b>4</b> Measure Tool, <b>5</b> Quest Codex &middot;
+        <kbd>R</kbd> toggles Length/Angle &middot; right-click a rope to cut it (<kbd>y</kbd>/<kbd>n</kbd>) &middot; <kbd>J</kbd> codex &middot;
+        <kbd>G</kbd> god view (debug) &middot; <kbd>Esc</kbd> closes overlays.
       </p>
     </section>
 
     <section class="panel">
+      <div id="quest-tracker" class="quest-tracker">
+        <h3>Current Quest <span id="quest-relic-count" class="badge">0 seals</span></h3>
+        <div class="quest-title" id="quest-title">No active quest</div>
+        <p class="hint" id="quest-description"></p>
+        <div class="quest-progress-row">
+          <span id="quest-objective">Objective</span>
+          <span id="quest-progress-label">-</span>
+        </div>
+        <div class="quest-bar"><div id="quest-bar-fill" class="quest-bar-fill"></div></div>
+        <p class="hint" id="quest-hint"></p>
+        <p class="quest-seal hidden" id="quest-seal">Exit sealed - a geometric relic is missing.</p>
+        <div class="quest-relics" id="quest-relics"></div>
+      </div>
+
       <h2>Instrument Panel</h2>
       <canvas id="gauge" width="240" height="130"></canvas>
       <div id="detector-text" class="readout">signal -</div>
@@ -45,6 +61,9 @@
       <div class="readout">position (u,v,z): <span id="position">-</span></div>
       <div class="readout">heading: <span id="heading">0&deg;</span></div>
       <div class="readout">slope: <span id="slope">-</span></div>
+      <div class="readout">Score: <span id="score">0</span></div>
+      <div class="readout">Map scale: <span id="scale-readout">1.00x</span> &middot; Difficulty: <span id="difficulty-readout">Easy</span></div>
+      <div class="readout hidden" id="sensor-offline">[Sensor Offline in Medium Mode]</div>
 
       <div class="controls">
         <label>speed
@@ -55,10 +74,6 @@
           </select>
         </label>
       </div>
-
-      <div id="toolbar" class="toolbar"></div>
-
-      <div id="tool-card" class="card hidden"></div>
 
       <h3>Markers</h3>
       <div id="markers" class="markers"><em>none yet</em></div>
@@ -86,6 +101,27 @@
         <select id="map-select"></select>
       </label>
       <p id="map-description" class="map-description"></p>
+
+      <label class="field">Map size (geometric scale)
+        <select id="scale-select">
+          <option value="0.5">Small (0.5x Scale, 1/8 Volume)</option>
+          <option value="1" selected>Medium (1.0x Scale, Default)</option>
+          <option value="2">Large (2.0x Scale, 8x Volume)</option>
+          <option value="4">Extra Large (4.0x Scale, 64x Volume)</option>
+          <option value="custom">Custom...</option>
+        </select>
+      </label>
+      <label class="field hidden" id="custom-scale-field">Custom scale S (0.2 - 10.0)
+        <input id="custom-scale-input" type="number" min="0.2" max="10" step="0.1" value="1.5" />
+      </label>
+
+      <fieldset class="field">
+        <legend>Difficulty</legend>
+        <label class="radio"><input type="radio" name="difficulty" value="easy" checked /> &#128994; Easy - distance detector + eye pointer (default)</label>
+        <label class="radio"><input type="radio" name="difficulty" value="medium" /> &#128993; Medium - distance detector offline; use the eye pointer and pure geometry</label>
+        <label class="radio"><input type="radio" name="difficulty" value="hard" /> &#128308; Hard - [Reserved / Work in Progress]</label>
+      </fieldset>
+      <p id="difficulty-note" class="hint"></p>
 
       <fieldset class="field">
         <legend>Play mode</legend>
@@ -119,6 +155,9 @@
         <div><dt>Map</dt><dd id="victory-map">-</dd></div>
         <div><dt>Topology</dt><dd id="victory-topology">-</dd></div>
         <div><dt>Seed</dt><dd id="victory-seed">-</dd></div>
+        <div><dt>Difficulty</dt><dd id="victory-difficulty">-</dd></div>
+        <div><dt>Map scale</dt><dd id="victory-scale">-</dd></div>
+        <div><dt>Final Score</dt><dd id="victory-score">0</dd></div>
       </dl>
       <div class="modal-actions">
         <button id="victory-continue" class="ghost">Continue Free Roam</button>
@@ -126,12 +165,48 @@
       </div>
     </div>
   </div>
+  <div id="proof-modal" class="modal hidden">
+    <div class="modal-card proof-card">
+      <h2 id="proof-title">Geometric Proof</h2>
+      <canvas id="proof-canvas" width="560" height="300"></canvas>
+      <ol id="proof-steps" class="proof-steps"></ol>
+      <div class="modal-actions">
+        <button id="proof-accept" class="primary">Accept Seal</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="measure-mode" class="measure-mode hidden">
+    <button id="measure-length" data-mode="length" class="active">Length</button>
+    <button id="measure-angle" data-mode="angle">Angle</button>
+  </div>
+
   <div id="hotbar" class="hotbar">
-    <button class="slot active" data-slot="1" data-tool="scan"><b>1</b><i>&#129517;</i><span>Compass</span></button>
-    <button class="slot" data-slot="2" data-tool="curvature"><b>2</b><i>&#128208;</i><span>Curvature</span></button>
-    <button class="slot" data-slot="3" data-tool="triangle"><b>3</b><i>&#128207;</i><span>Goniometer</span></button>
-    <button class="slot" data-slot="4" data-tool="pointer"><b>4</b><i>&#128302;</i><span>Eye</span></button>
-    <button class="slot" data-slot="5" data-tool="mark"><b>5</b><i>&#128681;</i><span>Beacon</span></button>
+    <button class="slot active" data-slot="1" data-tool="scan"><b>1</b><i>&#129517;</i><span>Exit Detector</span></button>
+    <button class="slot" data-slot="2" data-tool="mark"><b>2</b><i>&#128205;</i><span>Marker Peg</span></button>
+    <button class="slot" data-slot="3" data-tool="rope"><b>3</b><i>&#129698;</i><span>Surveyor Rope</span></button>
+    <button class="slot" data-slot="4" data-tool="measure"><b>4</b><i>&#128207;</i><span>Measure Tool</span></button>
+    <button class="slot" data-slot="5" data-tool="codex"><b>5</b><i>&#128214;</i><span>Quest Codex</span></button>
+  </div>
+
+  <div id="codex-modal" class="modal hidden">
+    <div class="modal-card codex-card">
+      <h2>Academy Codex</h2>
+      <div class="codex-body">
+        <h3>Active Quest</h3>
+        <div id="codex-quest-title" class="codex-title">-</div>
+        <p id="codex-quest-description" class="hint"></p>
+        <p id="codex-quest-hint" class="codex-hint"></p>
+        <div class="readout">Progress: <span id="codex-progress">-</span></div>
+        <h3>Relics</h3>
+        <div id="codex-relics" class="codex-relics"><em>none yet</em></div>
+        <h3>Field Notes</h3>
+        <p class="hint">Ropes remember only the nodes you have actually seen. The exit detector sleeps until the academy's trials are complete.</p>
+      </div>
+      <div class="modal-actions">
+        <button id="codex-close" class="primary">Close Codex</button>
+      </div>
+    </div>
   </div>
 
   <script type="module" src="app.js"></script>

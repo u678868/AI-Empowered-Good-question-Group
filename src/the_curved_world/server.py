@@ -13,6 +13,8 @@ exists when the server is started with ``debug=True``.
 from __future__ import annotations
 
 import json
+import math
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -24,6 +26,9 @@ from src.the_curved_world.config import ConfigError, WorldConfig, default_config
 from src.the_curved_world.maps import DEFAULT_MAP_ID, MapNotFound, MapRegistry, map_id_for, world_config_for
 from src.the_curved_world.gameplay import ExplorationGame, GameError, GameplayConfig
 from src.the_curved_world.observations import ObservationConfig
+from src.the_curved_world.quest import QuestManager
+from src.the_curved_world.ropes import RopeNode
+from src.the_curved_world.scanner import scan_manifold
 from src.the_curved_world.world import WorldGenerator
 
 WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
@@ -43,6 +48,33 @@ def _round(value: float, digits: int = 6) -> float:
     return round(float(value), digits)
 
 
+DIFFICULTY_TIERS = ("easy", "medium", "hard")
+
+
+def node_key_for(node) -> tuple:
+    """(kind, id) tuple used to match rope endpoints."""
+    return (str(node.kind), str(node.id))
+
+
+def _normalized_difficulty(value: Any) -> str:
+    key = str(value if value is not None else "easy").strip().lower()
+    if key not in DIFFICULTY_TIERS:
+        raise GameError(
+            f"difficulty must be one of {', '.join(DIFFICULTY_TIERS)}; got {value!r}"
+        )
+    return key
+
+
+def _validated_scale(value: Any) -> float:
+    try:
+        scale = float(value)
+    except (TypeError, ValueError) as exc:
+        raise GameError(f"scale must be a number within [0.2, 10.0]; got {value!r}") from exc
+    if not np.isfinite(scale) or not (0.2 <= scale <= 10.0):
+        raise GameError(f"scale must be within [0.2, 10.0]; got {value!r}")
+    return scale
+
+
 class GameSession:
     """Owns one exploration game and turns actions/state into JSON payloads.
 
@@ -60,6 +92,8 @@ class GameSession:
         observation_config: Optional[ObservationConfig] = None,
         mode: Optional[str] = None,
         debug: bool = False,
+        scale_factor: float = 1.0,
+        difficulty: str = "easy",
         patch_radius: Optional[float] = None,
         patch_resolution: int = 49,
         debug_resolution: int = 61,
@@ -73,6 +107,8 @@ class GameSession:
             self.map_id = map_id or map_id_for(world_config)
         self.mode = mode if mode in ("player", "god") else ("god" if debug else "player")
         self.debug = self.startup_debug
+        self.scale_factor = _validated_scale(scale_factor)
+        self.difficulty = _normalized_difficulty(difficulty)
         self._last_collided = False
         self.gameplay_config = GameplayConfig() if gameplay_config is None else gameplay_config
         self.observation_config = ObservationConfig() if observation_config is None else observation_config
@@ -93,8 +129,19 @@ class GameSession:
         self.seed = seed
         self._game = self._build(seed)
 
-    def reset_world(self, map_id: Optional[str] = None, seed: Optional[int] = None, mode: Optional[str] = None) -> Dict[str, Any]:
-        """Rebuild the world from a map id, seed and play mode (lobby entry)."""
+    def reset_world(
+        self,
+        map_id: Optional[str] = None,
+        seed: Optional[int] = None,
+        mode: Optional[str] = None,
+        scale: Optional[float] = None,
+        difficulty: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Rebuild the world from a map id, seed, mode, geometric scale and difficulty."""
+        if scale is not None:
+            self.scale_factor = _validated_scale(scale)
+        if difficulty is not None:
+            self.difficulty = _normalized_difficulty(difficulty)
         if map_id is not None:
             self.map_id = str(map_id)
             self.world_config = world_config_for(self.map_id)
@@ -111,21 +158,43 @@ class GameSession:
             "mode": self.mode,
             "seed": self._game.summary().seed,
             "periodic": bool(getattr(self._game.player_view.surface, "periodic", False)),
+            "scale_factor": _round(self.scale_factor),
+            "difficulty": self.difficulty,
         }
 
     def _build(self, seed: Optional[int]) -> ExplorationGame:
+        world_config = replace(
+            self.world_config, scale_factor=self.scale_factor, difficulty=self.difficulty
+        )
+        gameplay_config = replace(
+            self.gameplay_config, scale_factor=self.scale_factor, difficulty=self.difficulty
+        )
+        self._generator = WorldGenerator(world_config)
         world = self._generator.generate(seed)
-        return ExplorationGame(world, self.gameplay_config, self.observation_config)
+        genus_hint = None
+        try:
+            genus_hint = MapRegistry.get(self.map_id).genus
+        except MapNotFound:
+            genus_hint = None
+        features = scan_manifold(world.surface, samples=31, genus_hint=genus_hint)
+        quest_manager = QuestManager(features, seed=int(world.seed))
+        return ExplorationGame(
+            world,
+            gameplay_config,
+            self.observation_config,
+            quest_manager=quest_manager,
+        )
 
     # -- payload helpers ---------------------------------------------------
 
     @property
     def effective_patch_radius(self) -> float:
         """Patch radius: explicit if given, else a fraction of the parameter domain."""
+        scale = float(self.scale_factor) or 1.0
         if self.patch_radius is not None:
-            return float(self.patch_radius)
+            return float(self.patch_radius) / scale
         domain = self._game.player_view.surface.domain
-        return 0.22 * min(domain.width, domain.height)
+        return (0.22 * min(domain.width, domain.height)) / scale
     def _domain_payload(self) -> Dict[str, float]:
         domain = self._game.player_view.surface.domain
         return {
@@ -136,11 +205,33 @@ class GameSession:
         }
 
     def _observation_payload(self) -> Dict[str, Any]:
+        if self.difficulty in ("medium", "hard"):
+            # Task 17: medium strips the distance detector; hard is a reserved
+            # placeholder. Both return a neutral reading with no distance cue.
+            return {
+                "signal": 0.0,
+                "label": "Offline" if self.difficulty == "medium" else "Reserved",
+                "trend": "same",
+            }
+        if self._game.detector_locked:
+            # Task 19: the exit detector is sealed until the geometric trials are done.
+            return {"signal": 0.0, "label": "Sealed", "trend": "same"}
         observation = self._game.peek_detector()
         return {
             "signal": _round(observation.signal),
             "label": observation.label,
             "trend": observation.trend,
+        }
+
+    def _scoring_payload(self) -> Dict[str, Any]:
+        """Task 17: reserved scoring inputs; score itself is 0 until a formula lands."""
+        return {
+            "scale_factor": _round(self.scale_factor),
+            "difficulty": self.difficulty,
+            "difficulty_reserved": self.difficulty == "hard",
+            "score": _round(self._game.score),
+            "effective_steps": _round(self._game.effective_steps),
+            "tool_usages": {key: int(value) for key, value in self._game.tool_usages.items()},
         }
 
     def _surface_patch(self, position) -> Dict[str, Any]:
@@ -240,6 +331,10 @@ class GameSession:
             "up_3d": [_round(v) for v in game.frame()["up"]],
             "elapsed_time": _round(game.elapsed_time),
             "won": bool(game.won),
+            "detector_locked": bool(game.detector_locked),
+            "quest": game.quest_state(),
+            **game.rope_state(),
+            **self._scoring_payload(),
             **self._observation_payload(),
         }
 
@@ -311,6 +406,9 @@ class GameSession:
             "won": bool(result.won),
             "steps": self._game.steps,
             "yaw": _round(self._game.yaw, 6),
+            "detector_locked": bool(self._game.detector_locked),
+            "quest": self._game.quest_state(),
+            **self._scoring_payload(),
             **self._observation_payload(),
         }
 
@@ -355,6 +453,10 @@ class GameSession:
             "slope": {key: _round(value, 6) for key, value in self._game.last_slope.items()},
             "patch": patch,
             "obstacles": self._visible_obstacles(patch, result.position),
+            "detector_locked": bool(self._game.detector_locked),
+            "quest": self._game.quest_state(),
+            **self._game.rope_state(),
+            **self._scoring_payload(),
             **self._observation_payload(),
         }
     def step_action(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -388,11 +490,287 @@ class GameSession:
 
         count = self._step_count(payload.get("steps", 1))
         return self._move_payload(self._game.move_relative(str(direction), count))
+    def _visible_obstacles_now(self) -> List[Dict[str, Any]]:
+        position = self._game.position
+        patch = self._surface_patch(position)
+        return self._visible_obstacles(patch, position)
+
+    def _resolve_rope_node(self, spec: Any, obstacles: List[Dict[str, Any]]) -> RopeNode:
+        """Resolve a player-known rope endpoint (marker or in-view obstacle)."""
+        if not isinstance(spec, dict):
+            raise GameError("rope endpoints must be {type, id} objects")
+        kind = str(spec.get("type", "")).strip().lower()
+        raw_id = spec.get("id")
+        if kind == "marker":
+            name = str(raw_id)
+            marker = next((m for m in self._game.markers if m.name == name), None)
+            if marker is None:
+                raise GameError(f"unknown marker {name!r}")
+            point = self._game.player_view.position(marker.position)
+            return RopeNode(
+                "marker",
+                marker.name,
+                marker.name,
+                (float(marker.position[0]), float(marker.position[1])),
+                tuple(float(value) for value in point),
+            )
+        if kind == "obstacle":
+            try:
+                obstacle_id = int(raw_id)
+            except (TypeError, ValueError) as exc:
+                raise GameError(f"obstacle id must be an integer, got {raw_id!r}") from exc
+            entry = next((item for item in obstacles if int(item["id"]) == obstacle_id), None)
+            if entry is None:
+                raise GameError("that obstacle is not in view")
+            return RopeNode(
+                "obstacle",
+                str(obstacle_id),
+                f"{entry.get('kind', 'obstacle')} #{obstacle_id}",
+                (float(entry["u"]), float(entry["v"])),
+                tuple(float(value) for value in entry["position"]),
+            )
+        raise GameError(f"unknown rope node type {kind!r}")
+
+    def _measure_tool(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Task 19: ruler / protractor measurement modes."""
+        mode = str(payload.get("mode", "")).strip().lower()
+        targets = payload.get("targets")
+        if not isinstance(targets, (list, tuple)) or not targets:
+            raise GameError("measure requires a non-empty targets list")
+        game = self._game
+        if mode == "ruler":
+            first = targets[0]
+            if isinstance(first, dict) and str(first.get("type", "")).lower() == "rope":
+                rope = game.rope_system.get(int(first.get("id")))
+                return {
+                    "ok": True,
+                    "tool": "measure",
+                    "mode": "ruler",
+                    "kind": "rope_length",
+                    "rope_id": rope.id,
+                    "distance": _round(rope.length_3d),
+                }
+            if len(targets) == 2:
+                obstacles = self._visible_obstacles_now()
+                nodes = [self._resolve_rope_node(item, obstacles) for item in targets]
+                delta = [nodes[0].position_3d[i] - nodes[1].position_3d[i] for i in range(3)]
+                distance = math.sqrt(sum(value * value for value in delta))
+                return {
+                    "ok": True,
+                    "tool": "measure",
+                    "mode": "ruler",
+                    "kind": "node_distance",
+                    "a": nodes[0].to_dict(),
+                    "b": nodes[1].to_dict(),
+                    "distance": _round(distance),
+                }
+            raise GameError("ruler mode needs one rope or two nodes")
+        if mode == "angle":
+            if len(targets) != 1:
+                raise GameError("angle mode needs exactly one path point")
+            obstacles = self._visible_obstacles_now()
+            node = self._resolve_rope_node(targets[0], obstacles)
+            ropes = game.rope_system.ropes_at(node)
+            if len(ropes) != 2:
+                raise GameError(
+                    f"angle needs exactly two ropes at {node.label}; found {len(ropes)}"
+                )
+
+            def far_end(rope):
+                if (rope.node_a.kind, rope.node_a.id) == (node.kind, node.id):
+                    return rope.node_b
+                return rope.node_a
+
+            first = far_end(ropes[0])
+            second = far_end(ropes[1])
+            vec_a = [first.position_3d[i] - node.position_3d[i] for i in range(3)]
+            vec_b = [second.position_3d[i] - node.position_3d[i] for i in range(3)]
+            norm_a = math.sqrt(sum(value * value for value in vec_a))
+            norm_b = math.sqrt(sum(value * value for value in vec_b))
+            if norm_a < 1e-9 or norm_b < 1e-9:
+                raise GameError("cannot measure an angle at a degenerate rope endpoint")
+            cosine = sum(a * b for a, b in zip(vec_a, vec_b)) / (norm_a * norm_b)
+            angle = math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+            # One vertex only: the client collects all three vertex angles before
+            # it asks for the triangle sum (Task 19 rework #4).
+            return {
+                "ok": True,
+                "tool": "measure",
+                "mode": "angle",
+                "kind": "node_angle",
+                "node": node.to_dict(),
+                "far_nodes": [first.to_dict(), second.to_dict()],
+                "ropes": [rope.id for rope in ropes],
+                "angle_degrees": _round(angle, 6),
+            }
+        if mode == "angle_sum":
+            if len(targets) != 3:
+                raise GameError("angle_sum mode needs exactly three path points")
+            obstacles = self._visible_obstacles_now()
+            nodes = [self._resolve_rope_node(item, obstacles) for item in targets]
+            surface = game.player_view.surface
+            total = (
+                surface.tangent_angle(nodes[0].uv, nodes[1].uv, nodes[2].uv)
+                + surface.tangent_angle(nodes[1].uv, nodes[2].uv, nodes[0].uv)
+                + surface.tangent_angle(nodes[2].uv, nodes[0].uv, nodes[1].uv)
+            )
+            excess = total - math.pi
+            report = {
+                "sum": total,
+                "excess": excess,
+                "markers": [node.label for node in nodes],
+                "curvature_integral": 0.0,
+            }
+            return {
+                "ok": True,
+                "tool": "measure",
+                "mode": "angle_sum",
+                "kind": "rope_triangle_angle",
+                "nodes": [node.to_dict() for node in nodes],
+                "angle_sum_degrees": _round(math.degrees(total), 6),
+                "excess_degrees": _round(math.degrees(excess), 6),
+                **self._quest_tool_payload(game, report),
+            }
+        if mode == "protractor":
+            if len(targets) == 3 and all(isinstance(item, str) for item in targets):
+                names = [str(item) for item in targets]
+                report = game.triangle_report(names[0], names[1], names[2])
+                out = {
+                    "ok": True,
+                    "tool": "measure",
+                    "mode": "protractor",
+                    "kind": "triangle_angle_sum",
+                    "markers": names,
+                    "angles": [_round(value, 6) for value in report["angles"]],
+                    "sum": _round(report["sum"], 6),
+                    "excess": _round(report["excess"], 6),
+                    "excess_degrees": _round(math.degrees(report["excess"]), 6),
+                    "character": report["character"],
+                }
+                return {**out, **self._quest_tool_payload(game, report)}
+            if len(targets) == 3 and all(
+                isinstance(item, dict) and str(item.get("type", "")).lower() == "rope"
+                for item in targets
+            ):
+                ropes = [game.rope_system.get(int(item.get("id"))) for item in targets]
+                counts: Dict[Any, int] = {}
+                nodes: Dict[Any, RopeNode] = {}
+                for rope in ropes:
+                    for node in (rope.node_a, rope.node_b):
+                        key = (node.kind, node.id)
+                        counts[key] = counts.get(key, 0) + 1
+                        nodes[key] = node
+                if len(nodes) != 3 or any(count != 2 for count in counts.values()):
+                    raise GameError("three ropes must form a closed triangle over three nodes")
+                ordered = list(nodes.values())
+                a, b, c = ordered
+                surface = game.player_view.surface
+                total = (
+                    surface.tangent_angle(a.uv, b.uv, c.uv)
+                    + surface.tangent_angle(b.uv, c.uv, a.uv)
+                    + surface.tangent_angle(c.uv, a.uv, b.uv)
+                )
+                excess = total - math.pi
+                report = {
+                    "sum": total,
+                    "excess": excess,
+                    "markers": [node.label for node in ordered],
+                    "curvature_integral": 0.0,
+                }
+                return {
+                    "ok": True,
+                    "tool": "measure",
+                    "mode": "protractor",
+                    "kind": "rope_triangle_angle_sum",
+                    "nodes": [node.to_dict() for node in ordered],
+                    "sum": _round(total, 6),
+                    "excess": _round(excess, 6),
+                    "excess_degrees": _round(math.degrees(excess), 6),
+                    **self._quest_tool_payload(game, report),
+                }
+            if len(targets) == 2:
+                ropes = [
+                    game.rope_system.get(int(item.get("id")))
+                    for item in targets
+                    if isinstance(item, dict) and str(item.get("type", "")).lower() == "rope"
+                ]
+                if len(ropes) != 2:
+                    raise GameError("protractor with two ropes needs two rope targets")
+                shared = None
+                for node_a in (ropes[0].node_a, ropes[0].node_b):
+                    for node_b in (ropes[1].node_a, ropes[1].node_b):
+                        if node_a.kind == node_b.kind and node_a.id == node_b.id:
+                            shared = node_a
+                if shared is None:
+                    raise GameError("the two ropes do not share a node")
+
+                def other_end(rope, node):
+                    if (rope.node_a.kind, rope.node_a.id) == (node.kind, node.id):
+                        return rope.node_b
+                    return rope.node_a
+
+                first = other_end(ropes[0], shared)
+                second = other_end(ropes[1], shared)
+                vec_a = [first.position_3d[i] - shared.position_3d[i] for i in range(3)]
+                vec_b = [second.position_3d[i] - shared.position_3d[i] for i in range(3)]
+                norm_a = math.sqrt(sum(value * value for value in vec_a))
+                norm_b = math.sqrt(sum(value * value for value in vec_b))
+                if norm_a < 1e-9 or norm_b < 1e-9:
+                    raise GameError("cannot measure an angle at a degenerate rope endpoint")
+                cosine = sum(a * b for a, b in zip(vec_a, vec_b)) / (norm_a * norm_b)
+                angle = math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+                return {
+                    "ok": True,
+                    "tool": "measure",
+                    "mode": "protractor",
+                    "kind": "rope_angle",
+                    "shared_node": shared.to_dict(),
+                    "angle_degrees": _round(angle, 6),
+                }
+            raise GameError("protractor mode needs three markers or two ropes")
+        raise GameError(f"unknown measure mode {mode!r}")
+
+    def _quest_tool_payload(self, game: ExplorationGame, report: Dict[str, Any]) -> Dict[str, Any]:
+        """Task 18: quest progress + optional completion/proof for a goniometer use."""
+        completion = game.evaluate_triangle_measurement(report)
+        if completion is None:
+            return {
+                "quest_completed": False,
+                "quest": game.quest_state(),
+            }
+        return {
+            "quest_completed": True,
+            "quest": completion["quest"],
+            "proof": completion["proof"],
+        }
+
     def tool(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         tool = str(payload.get("tool", "")).strip().lower()
         game = self._game
 
         if tool == "scan":
+            silent = self.difficulty in ("medium", "hard")
+            if silent:
+                game.read_detector(payload.get("note"))
+                return {
+                    "ok": True,
+                    "tool": "scan",
+                    "signal": 0.0,
+                    "label": "Offline" if self.difficulty == "medium" else "Reserved",
+                    "trend": "same",
+                    "readings": len(game.log),
+                }
+            if game.detector_locked:
+                # Task 19: the seal sleeps the detector until the trials are done.
+                return {
+                    "ok": True,
+                    "tool": "scan",
+                    "signal": 0.0,
+                    "label": "Sealed",
+                    "trend": "same",
+                    "locked": True,
+                    "readings": len(game.log),
+                }
             observation = game.read_detector(payload.get("note"))
             return {
                 "ok": True,
@@ -413,6 +791,9 @@ class GameSession:
                 "label": marker.label,
             }
         if tool == "measure":
+            mode = str(payload.get("mode", "")).strip().lower()
+            if mode in ("ruler", "protractor", "angle", "angle_sum"):
+                return self._measure_tool(payload)
             distance = game.distance_between_markers(str(payload.get("a", "")), str(payload.get("b", "")))
             return {
                 "ok": True,
@@ -422,14 +803,29 @@ class GameSession:
                 "distance": _round(distance),
                 "kind": "ambient_euclidean_3d",
             }
+        if tool == "rope_connect":
+            obstacles = self._visible_obstacles_now()
+            node_a = self._resolve_rope_node(
+                {"type": payload.get("from_type"), "id": payload.get("from_id")}, obstacles
+            )
+            node_b = self._resolve_rope_node(
+                {"type": payload.get("to_type"), "id": payload.get("to_id")}, obstacles
+            )
+            rope = game.connect_rope(node_a, node_b)
+            return {"ok": True, "tool": "rope_connect", "rope": rope.to_dict(), **game.rope_state()}
+        if tool == "rope_clear":
+            raw_id = payload.get("rope_id")
+            removed = game.clear_ropes(None if raw_id is None else int(raw_id))
+            return {"ok": True, "tool": "rope_clear", "removed": removed, **game.rope_state()}
         if tool == "curvature":
+            game.record_tool_usage("curvature")
             return {"ok": True, "tool": "curvature", "curvature": _round(game.curvature(), 8)}
         if tool == "angle_sum":
             names = payload.get("markers")
             if not isinstance(names, (list, tuple)) or len(names) != 3:
                 raise GameError("angle_sum requires exactly three marker names")
             result = game.triangle_angle_sum(str(names[0]), str(names[1]), str(names[2]))
-            return {
+            report = {
                 "ok": True,
                 "tool": "angle_sum",
                 "markers": [str(name) for name in names],
@@ -438,12 +834,13 @@ class GameSession:
                 "excess": _round(result["excess"], 6),
                 "kind": "tangent_plane_angle_sum",
             }
+            return {**report, **self._quest_tool_payload(game, result)}
         if tool == "triangle":
             names = payload.get("markers")
             if not isinstance(names, (list, tuple)) or len(names) != 3:
                 raise GameError("triangle requires exactly three marker names")
             report = game.triangle_report(str(names[0]), str(names[1]), str(names[2]))
-            return {
+            payload_out = {
                 "ok": True,
                 "tool": "triangle",
                 "markers": [str(name) for name in names],
@@ -457,6 +854,7 @@ class GameSession:
                 "character": report["character"],
                 "kind": report["kind"],
             }
+            return {**payload_out, **self._quest_tool_payload(game, report)}
         if tool == "pointer":
             hint = game.release_pointer()
             return {
@@ -536,7 +934,11 @@ class CurvedWorldHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/session/new":
                 self._send_json(200, self.session.reset_world(
-                    payload.get("map_id"), payload.get("seed"), payload.get("mode")
+                    payload.get("map_id"),
+                    payload.get("seed"),
+                    payload.get("mode"),
+                    payload.get("scale"),
+                    payload.get("difficulty"),
                 ))
                 return
             if path == "/api/action/move":

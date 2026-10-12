@@ -40,6 +40,23 @@ const state = {
   drag: null,
   slot: 1,
   speedMultiplier: 1,
+  proofOpen: false,
+  proof: null,
+  shownRelicCount: 0,
+  ropeMode: false,
+  ropeFirst: null,
+  measureMode: false,
+  measureKind: 'length',
+  measureTargets: [],
+  angleMeasurements: {},
+  pendingCut: null,
+  codexOpen: false,
+  cursor: null,
+  hoverNode: null,
+  hitNodes: [],
+  hitRopes: [],
+  scaleFactor: 1,
+  difficulty: 'easy',
   readings: 0,
   victoryShown: false,
   cleared: false,
@@ -51,18 +68,8 @@ const state = {
   terrainCache: null,
 };
 
-// Toolbar is configuration driven: append an entry here to add a tool.
-const TOOLS = [
-  { id: 'scan', name: 'Compass scan' },
-  { id: 'curvature', name: 'Curvature' },
-  { id: 'mark', name: 'Beacon here' },
-  { id: 'measure', name: 'Ruler (2 markers)' },
-  { id: 'triangle', name: 'Angle gauge (3 markers)' },
-  { id: 'pointer', name: 'Eye pointer' },
-];
-
-// Hotbar slots map onto the same tool ids.
-const SLOT_TOOLS = ['scan', 'curvature', 'triangle', 'pointer', 'mark'];
+// Hotbar slots map onto the tool ids (Task 19).
+const SLOT_TOOLS = ['scan', 'mark', 'rope', 'measure', 'codex'];
 
 async function apiGet(path) {
   const response = await fetch(path, { cache: 'no-store' });
@@ -365,7 +372,8 @@ function collisionGeometry(patch) {
   const viewRadius = Math.max(1e-6, patch.radius || 1);
   const minObstacle = (MIN_OBSTACLE_PX / REFERENCE_HALF) * viewRadius;
   const minPlayer = (MIN_PLAYER_PX / REFERENCE_HALF) * viewRadius;
-  const playerParam = Math.max(PLAYER_RADIUS / unit, minPlayer);
+  const scale = state.scaleFactor || 1;
+  const playerParam = Math.max(PLAYER_RADIUS / scale / unit, minPlayer);
   const obstacleParam = (obstacle) => Math.max(obstacle.radius / metricUnit(metricAt(patch, obstacle.u, obstacle.v)), minObstacle);
   // Tiny safety margin for float / snapshot lag; the drawn disc uses the same
   // local metric, so the visual radius and the hard constraint stay aligned.
@@ -533,6 +541,8 @@ function drawTopDownWorld() {
     cx + relativeDelta(u, phys[0]) * scale,
     cy - relativeDelta(v, phys[1]) * scale,
   ];
+  state.hitNodes = [];
+  state.hitRopes = [];
 
   if (!state.terrainCache || state.terrainCache.patch !== patch) {
     state.terrainCache = { patch, data: buildTerrain(patch) };
@@ -665,13 +675,79 @@ function drawTopDownWorld() {
     const radius = geometry.obstacleParam(obstacle) * scale;
     if (obstacle.kind === 'tree') drawTopDownTree(ctx, point[0], point[1], radius);
     else drawTopDownRock(ctx, point[0], point[1], radius, obstacle.id || 0);
+    state.hitNodes.push({
+      type: 'obstacle',
+      id: obstacle.id,
+      label: `${obstacle.kind} #${obstacle.id}`,
+      x: point[0],
+      y: point[1],
+      r: Math.max(12, radius + 6),
+    });
   }
 
-  // 7. Placed markers above the terrain.
+  // 7. Surveyor cables (Task 19): taut lines between player-known nodes.
+  for (const rope of p.ropes || []) {
+    const a = project(rope.a.position[0], rope.a.position[1]);
+    const b = project(rope.b.position[0], rope.b.position[1]);
+    ctx.strokeStyle = 'rgba(10, 14, 20, 0.55)';
+    ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255, 214, 102, 0.85)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    for (const point of [a, b]) {
+      ctx.fillStyle = '#ffd166';
+      ctx.beginPath(); ctx.arc(point[0], point[1], 3.2, 0, TWO_PI); ctx.fill();
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
+      ctx.beginPath(); ctx.arc(point[0], point[1], 5.5, 0, TWO_PI); ctx.stroke();
+    }
+    const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    ctx.fillStyle = 'rgba(255, 214, 102, 0.85)';
+    ctx.font = '11px monospace';
+    ctx.fillText(`${rope.length_3d.toFixed(1)}m`, mid[0] + 5, mid[1] - 4);
+    state.hitRopes.push({ id: rope.id, a, b });
+  }
+
+  // 8. Placed markers above the terrain.
   for (const marker of p.markers || []) {
     const point = project(marker.position[0], marker.position[1]);
     if (Math.hypot(point[0] - cx, point[1] - cy) > R + 24) continue;
     drawMarker(ctx, point[0], point[1], marker.name, state.selection.includes(marker.name));
+    state.hitNodes.push({
+      type: 'marker',
+      id: marker.name,
+      label: marker.name,
+      x: point[0],
+      y: point[1],
+      r: 16,
+    });
+  }
+
+  // Task 19: node highlights + rubber-band rope preview.
+  const highlightNode = (node, colour, pad) => {
+    if (!node) return;
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, (node.r || 14) + (pad || 3), 0, TWO_PI);
+    ctx.stroke();
+  };
+  highlightNode(state.hoverNode, 'rgba(255, 255, 255, 0.75)', 3);
+  if (state.ropeFirst) {
+    const first = (state.hitNodes || []).find(
+      (node) => node.type === state.ropeFirst.type && String(node.id) === String(state.ropeFirst.id)
+    );
+    highlightNode(first, 'rgba(77, 171, 247, 0.95)', 4);
+    if (first && state.cursor) {
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = 'rgba(77, 171, 247, 0.8)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(first.x, first.y);
+      ctx.lineTo(state.cursor[0], state.cursor[1]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
 
   // 8. Beacons dropped by the hotbar.
@@ -970,7 +1046,15 @@ function forwardParamAngle(p) {
 
 function applySnapshot(snapshot) {
   state.player = state.player ? Object.assign({}, state.player, snapshot) : snapshot;
+  if (typeof state.player.scale_factor === 'number' && state.player.scale_factor > 0) {
+    state.scaleFactor = state.player.scale_factor;
+  }
+  if (typeof state.player.difficulty === 'string') {
+    state.difficulty = state.player.difficulty;
+  }
+  syncDetectorLock();
   state.terrainCache = null;
+  maybeShowQuestProof();
   if (!PHYS.uv) {
     PHYS.uv = state.player.position.slice();
     PHYS.heading = forwardParamAngle(state.player);
@@ -1014,6 +1098,9 @@ function maybeShowVictory() {
   el('victory-map').textContent = mapLabel(p.map_id);
   el('victory-topology').textContent = topologyLabel(p.map_id);
   el('victory-seed').textContent = `${p.seed}`;
+  el('victory-difficulty').textContent = difficultyLabel(state.difficulty);
+  el('victory-scale').textContent = `${(state.scaleFactor || 1).toFixed(2)}x`;
+  el('victory-score').textContent = `${Math.round(p.score || 0)}`;
   el('victory-modal').classList.remove('hidden');
   message('Exit found - the victory summary is open.', 'ok');
 }
@@ -1021,6 +1108,172 @@ function maybeShowVictory() {
 function hideVictory() {
   el('victory-modal').classList.add('hidden');
 }
+
+
+// ------------------------------------------- Task 18: quests & proof -----
+
+function renderQuest() {
+  const quest = state.player && state.player.quest;
+  if (!quest) return;
+  const relics = quest.relics || [];
+  el('quest-relic-count').textContent = `${relics.length} seal${relics.length === 1 ? '' : 's'}`;
+  el('quest-title').textContent = quest.title || 'No active quest';
+  el('quest-description').textContent = quest.description || '';
+  el('quest-hint').textContent = quest.hint || '';
+  const target = quest.target_angle_sum_degrees;
+  const current = quest.current_angle_sum_degrees;
+  if (typeof target === 'number') {
+    el('quest-objective').textContent = quest.objective || 'Angle Sum';
+    const shown = typeof current === 'number' ? current.toFixed(1) : '-';
+    el('quest-progress-label').textContent = `Angle Sum: ${shown} / ${target.toFixed(1)} deg`;
+  } else {
+    el('quest-objective').textContent = 'Objective';
+    el('quest-progress-label').textContent = 'all seals claimed';
+  }
+  el('quest-bar-fill').style.width = `${Math.round(clamp(quest.progress || 0, 0, 1) * 100)}%`;
+  el('quest-relics').textContent = relics.length ? `Relics: ${relics.join(', ')}` : '';
+  el('quest-seal').classList.toggle('hidden', !quest.exit_sealed);
+}
+
+let proofFrame = null;
+
+function drawProofFrame(ctx, W, H, time) {
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#101823');
+  bg.addColorStop(1, '#0a0f16');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.strokeStyle = 'rgba(120, 160, 200, 0.16)';
+  ctx.lineWidth = 1;
+  for (let gx = 20; gx <= W; gx += 40) {
+    ctx.beginPath();
+    for (let y = 0; y <= H; y += 8) {
+      const x = gx + 10 * Math.sin((y / H) * Math.PI + gx * 0.02 + time * 0.4);
+      if (y === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  for (let gy = 20; gy <= H; gy += 40) {
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 8) {
+      const y = gy + 9 * Math.cos((x / W) * Math.PI + gy * 0.02 + time * 0.4);
+      if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  const cx = W / 2;
+  const cy = H / 2 + 6;
+  const pulse = 1 + 0.06 * Math.sin(time * 2.2);
+  const radius = Math.min(W, H) * 0.30 * pulse;
+  const vertices = [0, 1, 2].map((k) => {
+    const angle = -Math.PI / 2 + k * 2 * Math.PI / 3;
+    return [cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)];
+  });
+
+  ctx.beginPath();
+  for (let k = 0; k < 3; k += 1) {
+    const a = vertices[k];
+    const b = vertices[(k + 1) % 3];
+    const mx = (a[0] + b[0]) / 2;
+    const my = (a[1] + b[1]) / 2;
+    const ox = mx - cx;
+    const oy = my - cy;
+    const norm = Math.hypot(ox, oy) || 1;
+    const bulge = 16;
+    const px = mx + (ox / norm) * bulge;
+    const py = my + (oy / norm) * bulge;
+    if (k === 0) ctx.moveTo(a[0], a[1]);
+    ctx.quadraticCurveTo(px, py, b[0], b[1]);
+  }
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(77, 171, 247, 0.12)';
+  ctx.fill();
+  ctx.strokeStyle = `rgba(255, 214, 102, ${0.7 + 0.25 * Math.sin(time * 3)})`;
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  for (let k = 0; k < 3; k += 1) {
+    const v = vertices[k];
+    ctx.strokeStyle = 'rgba(120, 210, 255, 0.85)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(v[0], v[1], 16, time * 1.5 + k * 2, time * 1.5 + k * 2 + 1.6);
+    ctx.stroke();
+    ctx.fillStyle = '#ffd166';
+    ctx.beginPath();
+    ctx.arc(v[0], v[1], 4, 0, TWO_PI);
+    ctx.fill();
+  }
+
+  ctx.fillStyle = 'rgba(232, 242, 228, 0.8)';
+  ctx.font = '13px monospace';
+  const proof = state.proof || {};
+  if (typeof proof.angle_sum_degrees === 'number') {
+    ctx.fillText(`measured ${proof.angle_sum_degrees.toFixed(1)} deg`, 16, 24);
+  }
+  if (typeof proof.target_degrees === 'number') {
+    ctx.fillText(`target ${proof.target_degrees.toFixed(1)} deg`, 16, 42);
+  }
+}
+
+function startProofAnimation() {
+  stopProofAnimation();
+  const canvas = el('proof-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
+  const started = performance.now();
+  const frame = (now) => {
+    drawProofFrame(ctx, W, H, (now - started) / 1000);
+    proofFrame = window.requestAnimationFrame(frame);
+  };
+  proofFrame = window.requestAnimationFrame(frame);
+}
+
+function stopProofAnimation() {
+  if (proofFrame) window.cancelAnimationFrame(proofFrame);
+  proofFrame = null;
+}
+
+function maybeShowQuestProof() {
+  const quest = state.player && state.player.quest;
+  if (!quest) return;
+  const count = (quest.relics || []).length;
+  if (count > (state.shownRelicCount || 0) && quest.last_proof) {
+    state.shownRelicCount = count;
+    syncDetectorLock();
+    renderAll();
+    showProof(quest.last_proof);
+    hintMessage('Geometric seal claimed - the proof is open.', 'ok');
+    return;
+  }
+  state.shownRelicCount = count;
+}
+
+function showProof(proof) {
+  state.proof = proof || {};
+  state.proofOpen = true;
+  el('proof-title').textContent = proof && proof.title ? proof.title : 'Geometric Proof';
+  const list = el('proof-steps');
+  list.innerHTML = '';
+  for (const step of (proof && proof.steps) || []) {
+    const item = document.createElement('li');
+    item.textContent = step;
+    list.appendChild(item);
+  }
+  el('proof-modal').classList.remove('hidden');
+  startProofAnimation();
+}
+
+function hideProof() {
+  stopProofAnimation();
+  state.proofOpen = false;
+  el('proof-modal').classList.add('hidden');
+}
+
 
 function continueFreeRoam() {
   hideVictory();
@@ -1059,7 +1312,7 @@ function physicsStep(dt) {
 
   const slope = localSlope(p.patch, PHYS.uv, du, dv);
   PHYS.slope = slope;
-  const speed = BASE_SPEED * slope.speed_scale * (state.speedMultiplier || 1);
+  const speed = BASE_SPEED * slope.speed_scale * (state.speedMultiplier || 1) / (state.scaleFactor || 1);
   const target = [PHYS.uv[0] + du * speed * dt, PHYS.uv[1] + dv * speed * dt];
   const resolved = resolveHardCollisions(PHYS.uv, target);
   const moved = Math.hypot(resolved.uv[0] - PHYS.uv[0], resolved.uv[1] - PHYS.uv[1]) > 1e-7;
@@ -1175,18 +1428,31 @@ function updateReadouts() {
   if (typeof p.signal === 'number') el('detector-text').textContent = `signal ${p.signal.toFixed(4)} (${p.label}, ${p.trend})`;
   if (typeof p.curvature === 'number') el('curvature').textContent = p.curvature.toFixed(6);
   el('mode').textContent = state.godVisible ? 'god view (debug)' : 'top-down map';
+  el('score').textContent = `${Math.round(p.score || 0)}`;
+  el('scale-readout').textContent = `${(state.scaleFactor || 1).toFixed(2)}x`;
+  el('difficulty-readout').textContent = difficultyLabel(state.difficulty);
+  const offline = state.difficulty === 'medium';
+  const locked = Boolean(p.detector_locked);
+  const offlineNote = el('sensor-offline');
+  if (offlineNote) {
+    offlineNote.textContent = locked
+      ? '[Exit Detector Sealed - complete the geometric trials]'
+      : '[Sensor Offline in Medium Mode]';
+    offlineNote.classList.toggle('hidden', !(offline || locked));
+  }
+  const detectorSlot = document.querySelector('.hotbar .slot[data-slot="1"]');
+  if (detectorSlot) {
+    detectorSlot.classList.toggle('offline', offline && !locked);
+    detectorSlot.classList.toggle('locked', locked);
+  }
+  renderQuest();
+  if (state.codexOpen) renderCodex();
 }
 
-function renderToolbar() {
-  const bar = el('toolbar');
-  bar.innerHTML = '';
-  for (const tool of TOOLS) {
-    const button = document.createElement('button');
-    button.dataset.tool = tool.id;
-    button.textContent = tool.name;
-    button.addEventListener('click', () => runTool(tool.id));
-    bar.appendChild(button);
-  }
+function difficultyLabel(tier) {
+  if (tier === 'medium') return 'Medium';
+  if (tier === 'hard') return 'Hard (reserved)';
+  return 'Easy';
 }
 
 function renderMarkers() {
@@ -1214,16 +1480,6 @@ function toggleSelection(name) {
   renderMarkers();
 }
 
-function showCard(html, kind) {
-  const card = el('tool-card');
-  card.className = 'card' + (kind ? ` ${kind}` : '');
-  card.innerHTML = html;
-}
-
-function hideCard() {
-  el('tool-card').className = 'card hidden';
-}
-
 function message(text, kind) {
   const box = el('message');
   box.textContent = text;
@@ -1242,123 +1498,67 @@ function renderAll() {
 
 const DEG = 180 / Math.PI;
 
-function describeTool(result) {
-  if (result.tool === 'scan') return `scan: signal ${result.signal.toFixed(4)} (${result.label}, ${result.trend})`;
-  if (result.tool === 'mark') {
-    return `marker ${result.name} placed at (${result.position[0].toFixed(2)}, ${result.position[1].toFixed(2)})`;
+let hintTimer = null;
+
+function hintMessage(text, kind, sticky) {
+  const box = el('hint-box');
+  if (!box) return;
+  if (!text) {
+    box.classList.add('hidden');
+    return;
   }
-  if (result.tool === 'measure') {
-    return `straight-line 3D distance ${result.a} -> ${result.b} = ${result.distance.toFixed(4)}`;
+  box.textContent = text;
+  box.className = `hint-box ${kind || 'info'}`;
+  if (hintTimer) {
+    window.clearTimeout(hintTimer);
+    hintTimer = null;
   }
-  if (result.tool === 'curvature') return `Gaussian curvature K = ${result.curvature.toFixed(6)}`;
-  if (result.tool === 'triangle') {
-    return `geodesic angle sum (${result.markers.join(', ')}) = ${(result.sum * DEG).toFixed(2)} deg`;
+  if (!sticky) {
+    hintTimer = window.setTimeout(() => box.classList.add('hidden'), 7000);
   }
-  if (result.tool === 'pointer') {
-    return `pointer: bearing ${result.bearing_degrees.toFixed(1)} deg, pitch ${result.pitch_degrees.toFixed(1)} deg`
-      + ` (${result.uses_remaining} left)`;
-  }
-  return JSON.stringify(result);
 }
 
-function triangleCard(result) {
-  const sum = result.sum * DEG;
-  const excess = result.excess * DEG;
-  return `
-    <h4>Geodesic angle gauge</h4>
-    <div class="big">${sum.toFixed(2)}&deg;</div>
-    <div class="sub">
-      vertices ${result.markers.join(' / ')}<br />
-      excess over 180&deg;: ${excess.toFixed(3)}&deg;<br />
-      &#8748; K dA (numeric): ${result.curvature_integral.toExponential(3)} rad<br />
-      Gauss-Bonnet residual: ${result.gauss_bonnet_residual.toExponential(3)} rad<br />
-      ${result.character}
-    </div>`;
-}
-
-function curvatureCard(result) {
-  const K = result.curvature;
-  const character = K > 1e-9
-    ? 'positively curved - dome-like here'
-    : K < -1e-9
-      ? 'negatively curved - saddle-like here'
-      : 'nearly flat at this point';
-  return `
-    <h4>Local Gaussian curvature</h4>
-    <div class="big">K = ${K.toExponential(4)}</div>
-    <div class="sub">${character}<br />analytic value from the Python kernel</div>`;
-}
-
-function pointerCard(result) {
-  return `
-    <h4>Tangent-plane pointer</h4>
-    <div class="big">${result.bearing_degrees.toFixed(1)}&deg;</div>
-    <div class="sub">
-      bearing in the tangent plane (coarse, ${result.sector_width_degrees.toFixed(1)}&deg; sectors)<br />
-      pitch above the tangent plane: ${result.pitch_degrees.toFixed(1)}&deg;<br />
-      uses remaining: ${result.uses_remaining}
-    </div>`;
+function askCut(target) {
+  state.pendingCut = target;
+  hintMessage(
+    target === 'all'
+      ? 'Cut all ropes? Press y to confirm, n to cancel.'
+      : `Cut rope #${target}? Press y to confirm, n to cancel.`,
+    'warn',
+    true
+  );
 }
 
 async function runTool(tool) {
   try {
     if (tool === 'scan') {
+      if (state.player && state.player.detector_locked) {
+        hintMessage('The exit detector is sealed. Complete the geometric trials first.', 'warn');
+        return;
+      }
+      if (state.difficulty === 'medium') {
+        hintMessage('[Sensor Offline in Medium Mode]', 'warn');
+        return;
+      }
       const result = await apiPost('/api/action/tool', { tool });
       state.compassPulse = 1.1;
       if (Number.isFinite(result.readings)) state.readings = result.readings;
       else state.readings += 1;
       await refreshState();
-      message(describeTool(result), 'ok');
-      return;
-    }
-    if (tool === 'curvature') {
-      const result = await apiPost('/api/action/tool', { tool });
-      showCard(curvatureCard(result), result.curvature > 0 ? 'positive' : result.curvature < 0 ? 'negative' : '');
-      await refreshState();
-      message(describeTool(result), 'ok');
+      hintMessage(`Signal ${result.signal.toFixed(4)} (${result.label}, ${result.trend}).`, 'ok');
       return;
     }
     if (tool === 'mark') {
       const count = state.player ? state.player.markers.length : 0;
-      const result = await apiPost('/api/action/tool', { tool: 'mark', name: `P${count + 1}` });
+      const result = await apiPost('/api/action/tool', { tool: 'mark', name: markerName(count) });
       spawnBeacon();
       await refreshState();
-      message(describeTool(result), 'ok');
+      hintMessage(`Marker ${result.name} placed at (${result.position[0].toFixed(2)}, ${result.position[1].toFixed(2)}).`, 'ok');
       return;
     }
-    if (tool === 'measure') {
-      const selected = state.selection.slice(0, 2);
-      if (selected.length < 2) {
-        message('Ruler: select two markers in the list first.', 'error');
-        return;
-      }
-      const result = await apiPost('/api/action/tool', { tool: 'measure', a: selected[0], b: selected[1] });
-      state.lastMeasure = result;
-      message(describeTool(result), 'ok');
-      return;
-    }
-    if (tool === 'triangle') {
-      const selected = state.selection.slice(0, 3);
-      if (selected.length < 3) {
-        message('Angle gauge: select three markers in the list first.', 'error');
-        return;
-      }
-      const result = await apiPost('/api/action/tool', { tool: 'triangle', markers: selected });
-      showCard(triangleCard(result), result.excess > 0 ? 'positive' : 'negative');
-      message(describeTool(result), 'ok');
-      return;
-    }
-    if (tool === 'pointer') {
-      const result = await apiPost('/api/action/tool', { tool: 'pointer' });
-      spawnPointerBolt(result);
-      showCard(pointerCard(result));
-      await refreshState();
-      message(describeTool(result), 'ok');
-      return;
-    }
-    message(`unknown tool ${tool}`, 'error');
+    hintMessage(`Unknown tool ${tool}.`, 'error');
   } catch (error) {
-    message(error.message, 'error');
+    hintMessage(error.message, 'error');
   }
 }
 
@@ -1416,37 +1616,66 @@ function hideLobby() {
   window.setTimeout(() => modal.classList.add('hidden'), 240);
 }
 
+function updateScaleField() {
+  const custom = el('scale-select').value === 'custom';
+  el('custom-scale-field').classList.toggle('hidden', !custom);
+}
+
+function updateDifficultyNote() {
+  const tier = document.querySelector('input[name="difficulty"]:checked').value;
+  const note = el('difficulty-note');
+  if (tier === 'medium') {
+    note.textContent = 'Medium: the distance detector is offline; use the eye pointer, curvature and the goniometer.';
+  } else if (tier === 'hard') {
+    note.textContent = 'Hard is [Reserved / Work in Progress] - entering uses a safe placeholder with the detector offline.';
+  } else {
+    note.textContent = '';
+  }
+}
+
 async function enterWorld() {
   const mapId = el('map-select').value;
   const mode = document.querySelector('input[name="mode"]:checked').value;
+  const difficulty = document.querySelector('input[name="difficulty"]:checked').value;
   const seedText = el('seed-input').value.trim();
   const seed = seedText === '' ? null : Number(seedText);
   if (seedText !== '' && !Number.isFinite(seed)) {
     el('lobby-error').textContent = 'The seed must be an integer.';
     return;
   }
+  const scaleText = el('scale-select').value;
+  const scale = scaleText === 'custom' ? Number(el('custom-scale-input').value) : Number(scaleText);
+  if (!Number.isFinite(scale) || scale < 0.2 || scale > 10) {
+    el('lobby-error').textContent = 'The map scale S must be a number within [0.2, 10.0].';
+    return;
+  }
   try {
-    await apiPost('/api/session/new', { map_id: mapId, seed, mode });
+    await apiPost('/api/session/new', { map_id: mapId, seed, mode, scale, difficulty });
     state.selection = [];
     state.particles = [];
     state.beacons = [];
     state.lastMeasure = null;
+    state.pendingCut = null;
+    state.angleMeasurements = {};
     state.compassPulse = 0;
     state.terrainCache = null;
+    state.scaleFactor = scale;
+    state.difficulty = difficulty;
     state.readings = 0;
+    state.shownRelicCount = 0;
     state.victoryShown = false;
     state.cleared = false;
     state.startedAt = Date.now();
     hideVictory();
+    hideProof();
     el('cleared').classList.add('hidden');
     PHYS.uv = null;
     PHYS.dirty = false;
     PHYS.hitFlash = 0;
-    hideCard();
     await refreshState();
     hideLobby();
     await setGodView(mode === 'god');
-    message(`entered ${mapLabel(mapId)} (${mode} mode) - WASD to run, mouse to aim, Q/E to turn`);
+    message(`entered ${mapLabel(mapId)} (${mode}, ${scale.toFixed(2)}x, ${difficultyLabel(difficulty)}) - WASD to run, mouse to aim, Q/E to turn`);
   } catch (error) {
     el('lobby-error').textContent = error.message;
   }
@@ -1457,16 +1686,378 @@ async function enterWorld() {
 const MOVE_KEYS = ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
 
 function selectSlot(slot) {
+  state.pendingCut = null;
+  state.angleMeasurements = {};
+  state.measureTargets = [];
   state.slot = clamp(Math.round(slot), 1, 5);
+  state.ropeMode = state.slot === 3;
+  state.measureMode = state.slot === 4;
+  state.ropeFirst = null;
+  state.measureTargets = [];
   for (const button of document.querySelectorAll('.hotbar .slot')) {
     button.classList.toggle('active', Number(button.dataset.slot) === state.slot);
   }
+  const capsule = el('measure-mode');
+  if (capsule) capsule.classList.toggle('hidden', !state.measureMode);
   const label = document.querySelector(`.hotbar .slot[data-slot="${state.slot}"] span`);
-  message(`hand tool ${state.slot}: ${label ? label.textContent : ''}`);
+  const name = label ? label.textContent : '';
+  if (state.ropeMode) {
+    hintMessage('Rope: select two path points.', 'info');
+  } else if (state.measureMode) {
+    hintMessage('Measure: choose Length or Angle.', 'info');
+  } else {
+    message(`hand tool ${state.slot}: ${name}`);
+  }
 }
 
 function useSlot() {
-  runTool(SLOT_TOOLS[state.slot - 1] || 'scan');
+  const slot = state.slot;
+  if (slot === 1) {
+    if (state.player && state.player.detector_locked) {
+      hintMessage('The exit detector is sealed by the academy geometric trial. Complete the quests to unlock it.', 'warn');
+      return;
+    }
+    runTool('scan');
+    return;
+  }
+  if (slot === 2) {
+    runTool('mark');
+    return;
+  }
+  if (slot === 3) {
+    selectSlot(3);
+    hintMessage('Rope: select two path points.', 'info');
+    return;
+  }
+  if (slot === 4) {
+    selectSlot(4);
+    hintMessage('Measure: choose Length or Angle.', 'info');
+    return;
+  }
+  if (slot === 5) {
+    toggleCodex();
+    return;
+  }
+}
+
+function markerName(index) {
+  const letter = String.fromCharCode(65 + (index % 26));
+  const cycle = Math.floor(index / 26);
+  return cycle === 0 ? letter : `${letter}${cycle}`;
+}
+
+function sameNode(a, b) {
+  return Boolean(a && b && a.type === b.type && String(a.id) === String(b.id));
+}
+
+function nodeKeyOf(node) {
+  return `${node.type}:${node.id}`;
+}
+
+function syncDetectorLock() {
+  const quest = state.player && state.player.quest;
+  if (quest && typeof quest.exit_sealed === 'boolean') {
+    state.player.detector_locked = quest.exit_sealed;
+  }
+}
+
+function findRopeBetween(a, b) {
+  const ropes = (state.player && state.player.ropes) || [];
+  return ropes.find(
+    (rope) => (sameNode(rope.a, a) && sameNode(rope.b, b)) || (sameNode(rope.a, b) && sameNode(rope.b, a))
+  ) || null;
+}
+
+function nearestNode(x, y) {
+  let best = null;
+  for (const node of state.hitNodes || []) {
+    const distance = Math.hypot(node.x - x, node.y - y);
+    if (distance <= (node.r || 14) && (!best || distance < best.distance)) {
+      best = { node, distance };
+    }
+  }
+  return best ? best.node : null;
+}
+
+function pointSegmentDistance(px, py, a, b) {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq < 1e-9) return Math.hypot(px - a[0], py - a[1]);
+  const t = clamp(((px - a[0]) * dx + (py - a[1]) * dy) / lengthSq, 0, 1);
+  return Math.hypot(px - (a[0] + t * dx), py - (a[1] + t * dy));
+}
+
+function nearestRope(eventOrX, y) {
+  let x = eventOrX;
+  if (eventOrX && typeof eventOrX === 'object' && eventOrX.clientX !== undefined) {
+    const rect = el('map-canvas').getBoundingClientRect();
+    x = eventOrX.clientX - rect.left;
+    y = eventOrX.clientY - rect.top;
+  }
+  let best = null;
+  for (const rope of state.hitRopes || []) {
+    const distance = pointSegmentDistance(x, y, rope.a, rope.b);
+    if (distance <= 14 && (!best || distance < best.distance)) best = { rope, distance };
+  }
+  return best ? best.rope : null;
+}
+
+function handleMapClick(event) {
+  const rect = el('map-canvas').getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  state.cursor = [x, y];
+  if (state.ropeMode) {
+    handleRopeClick(x, y);
+    return;
+  }
+  if (state.measureMode) {
+    handleMeasureClick(x, y);
+    return;
+  }
+  useSlot();
+}
+
+function applyRopeState(result) {
+  if (!state.player) return;
+  state.player = Object.assign({}, state.player, {
+    ropes: result.ropes || [],
+    rope_remaining: result.rope_remaining,
+    rope_used: result.rope_used,
+    rope_total: result.rope_total,
+    rope_max_segment: result.rope_max_segment,
+  });
+}
+
+async function connectRope(a, b) {
+  try {
+    const result = await apiPost('/api/action/tool', {
+      tool: 'rope_connect',
+      from_type: a.type,
+      from_id: a.id,
+      to_type: b.type,
+      to_id: b.id,
+    });
+    applyRopeState(result);
+    renderAll();
+    hintMessage(`Rope #${result.rope.id} tied: ${result.rope.length_3d.toFixed(2)} m (remaining ${result.rope_remaining.toFixed(2)} m).`, 'ok');
+  } catch (error) {
+    hintMessage(error.message, 'error');
+  }
+}
+
+async function cutRope(ropeId) {
+  try {
+    const result = await apiPost('/api/action/tool', { tool: 'rope_clear', rope_id: ropeId });
+    applyRopeState(result);
+    renderAll();
+    hintMessage(`Rope #${ropeId} cut (remaining ${result.rope_remaining.toFixed(2)} m).`, 'ok');
+  } catch (error) {
+    hintMessage(error.message, 'error');
+  }
+}
+
+async function clearRopes() {
+  if (!state.player || !(state.player.ropes || []).length) {
+    message('No ropes to cut.');
+    return;
+  }
+  try {
+    const result = await apiPost('/api/action/tool', { tool: 'rope_clear' });
+    applyRopeState(result);
+    renderAll();
+    hintMessage(`All ropes cut (remaining ${result.rope_remaining.toFixed(2)} m).`, 'ok');
+  } catch (error) {
+    hintMessage(error.message, 'error');
+  }
+}
+
+function handleRopeClick(x, y) {
+  if (!state.ropeFirst) {
+    const node = nearestNode(x, y);
+    if (!node) {
+      hintMessage('Rope: select two path points.', 'warn');
+      return;
+    }
+    state.ropeFirst = { type: node.type, id: node.id, label: node.label };
+    hintMessage(`Rope anchor ${node.label}: click the second path point.`, 'ok');
+    return;
+  }
+  const node = nearestNode(x, y);
+  if (!node) {
+    hintMessage('Rope: click the second path point.', 'warn');
+    return;
+  }
+  if (sameNode(state.ropeFirst, node)) {
+    hintMessage('Rope: choose a different second path point.', 'warn');
+    return;
+  }
+  const first = state.ropeFirst;
+  state.ropeFirst = null;
+  connectRope(first, node);
+}
+
+function setMeasureKind(kind) {
+  state.measureKind = kind === 'angle' ? 'angle' : 'length';
+  state.measureTargets = [];
+  for (const button of document.querySelectorAll('#measure-mode button')) {
+    button.classList.toggle('active', button.dataset.mode === state.measureKind);
+  }
+  if (state.slot !== 4) selectSlot(4);
+  hintMessage(
+    state.measureKind === 'angle'
+      ? 'Angle: pick a path point bound to exactly two ropes (or three markers for a triangle).'
+      : 'Length: click a rope (or two path points) to measure it.',
+    'info'
+  );
+}
+
+function countRopesAt(node) {
+  const ropes = (state.player && state.player.ropes) || [];
+  return ropes.filter(
+    (rope) =>
+      (rope.a.type === node.type && String(rope.a.id) === String(node.id)) ||
+      (rope.b.type === node.type && String(rope.b.id) === String(node.id))
+  ).length;
+}
+
+async function handleMeasureClick(x, y) {
+  if (state.measureKind === 'length') {
+    const rope = nearestRope(x, y);
+    if (!rope) {
+      hintMessage('Length: click a rope to measure it.', 'warn');
+      return;
+    }
+    try {
+      const result = await apiPost('/api/action/tool', {
+        tool: 'measure',
+        mode: 'ruler',
+        targets: [{ type: 'rope', id: rope.id }],
+      });
+      hintMessage(`Rope #${result.rope_id} length: ${result.distance.toFixed(3)} m.`, 'ok');
+    } catch (error) {
+      hintMessage(error.message, 'error');
+    }
+    return;
+  }
+
+  const node = nearestNode(x, y);
+  if (!node) {
+    hintMessage('Angle: click a path point with two ropes, or pick three markers.', 'warn');
+    return;
+  }
+  if (countRopesAt(node) === 2) {
+    try {
+      const result = await apiPost('/api/action/tool', {
+        tool: 'measure',
+        mode: 'angle',
+        targets: [{ type: node.type, id: node.id }],
+      });
+      const farNodes = (result.far_nodes || []).map((item) => ({ type: item.type, id: item.id, label: item.label }));
+      const closing = farNodes.length === 2 ? findRopeBetween(farNodes[0], farNodes[1]) : null;
+      if (!closing) {
+        hintMessage(`Angle at ${node.label}: ${result.angle_degrees.toFixed(2)} deg.`, 'ok');
+        return;
+      }
+      const vertices = [node, ...farNodes];
+      const key = vertices.map(nodeKeyOf).sort().join('|');
+      const entry = state.angleMeasurements[key] || { vertices: {}, angles: {} };
+      entry.vertices[nodeKeyOf(node)] = node;
+      entry.angles[nodeKeyOf(node)] = result.angle_degrees;
+      state.angleMeasurements[key] = entry;
+      const measured = Object.keys(entry.angles).length;
+      if (measured < 3) {
+        hintMessage(
+          `Angle at ${node.label}: ${result.angle_degrees.toFixed(2)} deg (${measured}/3 vertices measured).`,
+          'info'
+        );
+        return;
+      }
+      const targets = Object.values(entry.vertices).map((vertex) => ({ type: vertex.type, id: vertex.id }));
+      delete state.angleMeasurements[key];
+      const summed = await apiPost('/api/action/tool', { tool: 'measure', mode: 'angle_sum', targets });
+      hintMessage(
+        `Triangle angle sum: ${summed.angle_sum_degrees.toFixed(2)} deg (excess ${summed.excess_degrees.toFixed(2)} deg).`,
+        'ok'
+      );
+      if (summed.quest_completed && summed.proof) {
+        state.player = Object.assign({}, state.player, { quest: summed.quest });
+        state.shownRelicCount = (summed.quest.relics || []).length;
+        syncDetectorLock();
+        await refreshState();
+        showProof(summed.proof);
+        hintMessage('Quest complete - the Curvature Seal is yours!', 'ok');
+      } else if (summed.quest) {
+        state.player = Object.assign({}, state.player, { quest: summed.quest });
+        syncDetectorLock();
+        renderAll();
+      }
+    } catch (error) {
+      hintMessage(error.message, 'error');
+    }
+    return;
+  }
+
+  if (node.type !== 'marker') {
+    hintMessage(`Angle: ${node.label} needs exactly two ropes.`, 'warn');
+    return;
+  }
+  if (state.measureTargets.some((item) => item.id === node.id)) {
+    hintMessage('Angle: that marker is already selected.', 'warn');
+    return;
+  }
+  state.measureTargets.push({ type: 'marker', id: node.id, label: node.label });
+  if (state.measureTargets.length < 3) {
+    hintMessage(`Angle (triangle): ${state.measureTargets.length}/3 markers selected.`, 'info');
+    return;
+  }
+  const names = state.measureTargets.slice(0, 3).map((item) => item.id);
+  state.measureTargets = [];
+  try {
+    const result = await apiPost('/api/action/tool', { tool: 'measure', mode: 'protractor', targets: names });
+    if (result.quest_completed && result.proof) {
+      state.player = Object.assign({}, state.player, { quest: result.quest });
+      state.shownRelicCount = (result.quest.relics || []).length;
+      syncDetectorLock();
+      await refreshState();
+      showProof(result.proof);
+      hintMessage('Quest complete - the Curvature Seal is yours!', 'ok');
+    } else {
+      if (result.quest) {
+        state.player = Object.assign({}, state.player, { quest: result.quest });
+        syncDetectorLock();
+        renderAll();
+      }
+      hintMessage(`Angle sum ${names.join(' / ')} = ${(result.sum * DEG).toFixed(2)} deg.`, 'ok');
+    }
+  } catch (error) {
+    hintMessage(error.message, 'error');
+  }
+}
+
+function toggleCodex(force) {
+  const open = force === undefined ? !state.codexOpen : Boolean(force);
+  state.codexOpen = open;
+  el('codex-modal').classList.toggle('hidden', !open);
+  if (open) renderCodex();
+}
+
+function renderCodex() {
+  const quest = state.player && state.player.quest;
+  if (!quest) return;
+  el('codex-quest-title').textContent = quest.title || 'No active quest';
+  el('codex-quest-description').textContent = quest.description || '';
+  el('codex-quest-hint').textContent = quest.hint ? `Hint: ${quest.hint}` : '';
+  const target = quest.target_angle_sum_degrees;
+  const current = quest.current_angle_sum_degrees;
+  el('codex-progress').textContent = typeof target === 'number'
+    ? `Angle Sum ${typeof current === 'number' ? current.toFixed(1) : '-'} / ${target.toFixed(1)} deg (${Math.round((quest.progress || 0) * 100)}%)`
+    : 'All geometric seals claimed';
+  const relics = quest.relics || [];
+  el('codex-relics').innerHTML = relics.length
+    ? relics.map((relic) => `&#9670; ${relic}`).join('<br />')
+    : '<em>none yet</em>';
 }
 
 window.addEventListener('keydown', (event) => {
@@ -1481,9 +2072,32 @@ window.addEventListener('keydown', (event) => {
     selectSlot(Number(key));
     return;
   }
+  if (state.pendingCut !== null) {
+    if (key === 'y') {
+      const target = state.pendingCut;
+      state.pendingCut = null;
+      if (target === 'all') clearRopes();
+      else cutRope(target);
+    } else if (key === 'n' || key === 'escape') {
+      state.pendingCut = null;
+      hintMessage('Cut cancelled.', 'info');
+    }
+    return;
+  }
   if (key === ' ') {
     event.preventDefault();
     useSlot();
+  } else if (key === 'r') {
+    setMeasureKind(state.measureKind === 'angle' ? 'length' : 'angle');
+    if (state.slot !== 4) selectSlot(4);
+  } else if (key === 'j') {
+    toggleCodex();
+  } else if (key === 'c') {
+    if (state.player && (state.player.ropes || []).length) askCut('all');
+  } else if (key === 'escape' && state.proofOpen) {
+    hideProof();
+  } else if (key === 'escape' && state.codexOpen) {
+    toggleCodex(false);
   } else if (key === 'g') toggleGodView();
   else if (key === 'escape' && state.godVisible) toggleGodView();
 });
@@ -1495,14 +2109,26 @@ window.addEventListener('blur', () => keysDown.clear());
 
 const mapCanvas = el('map-canvas');
 mapCanvas.addEventListener('mousemove', (event) => {
-  if (state.godVisible) return;
   const rect = mapCanvas.getBoundingClientRect();
-  const x = event.clientX - rect.left - rect.width / 2;
-  const y = event.clientY - rect.top - rect.height / 2;
+  const localX = event.clientX - rect.left;
+  const localY = event.clientY - rect.top;
+  state.cursor = [localX, localY];
+  state.hoverNode = nearestNode(localX, localY);
+  const x = localX - rect.width / 2;
+  const y = localY - rect.height / 2;
   if (Math.hypot(x, y) < 12) return;
   PHYS.headingTarget = Math.atan2(-y, x);
 });
-mapCanvas.addEventListener('click', () => useSlot());
+mapCanvas.addEventListener('click', (event) => handleMapClick(event));
+mapCanvas.addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+  const rope = nearestRope(event, true);
+  if (rope) askCut(rope.id);
+});
+for (const button of document.querySelectorAll('#measure-mode button')) {
+  button.addEventListener('click', () => setMeasureKind(button.dataset.mode));
+}
+el('codex-close').addEventListener('click', () => toggleCodex(false));
 
 const godCanvas = el('god-canvas');
 godCanvas.addEventListener('mousedown', (event) => {
@@ -1520,11 +2146,12 @@ window.addEventListener('mousemove', (event) => {
 for (const button of document.querySelectorAll('.hotbar .slot')) {
   button.addEventListener('click', (event) => {
     event.stopPropagation();
-    selectSlot(Number(button.dataset.slot));
+    const slot = Number(button.dataset.slot);
+    selectSlot(slot);
+    if (slot === 5) toggleCodex(true);
   });
 }
 window.addEventListener('wheel', (event) => {
-  if (state.godVisible) return;
   if (event.target !== mapCanvas) return;
   const next = clamp(state.slot + (event.deltaY > 0 ? 1 : -1), 1, 5);
   selectSlot(next);
@@ -1532,8 +2159,15 @@ window.addEventListener('wheel', (event) => {
 
 el('map-select').addEventListener('change', showMapDescription);
 el('enter-world').addEventListener('click', enterWorld);
+el('scale-select').addEventListener('change', updateScaleField);
+for (const radio of document.querySelectorAll('input[name="difficulty"]')) {
+  radio.addEventListener('change', updateDifficultyNote);
+}
+updateScaleField();
+updateDifficultyNote();
 el('victory-continue').addEventListener('click', continueFreeRoam);
 el('victory-lobby').addEventListener('click', returnToLobby);
+el('proof-accept').addEventListener('click', hideProof);
 el('open-lobby').addEventListener('click', showLobby);
 el('step-size').addEventListener('change', (event) => {
   state.speedMultiplier = clamp(Number(event.target.value) || 1, 0.25, 4);
@@ -1542,7 +2176,6 @@ el('step-size').addEventListener('change', (event) => {
 
 async function init() {
   try {
-    renderToolbar();
     window.requestAnimationFrame(renderLoop);
     const payload = await apiGet('/api/maps');
     state.maps = payload.maps || [];

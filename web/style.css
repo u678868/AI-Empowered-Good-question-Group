@@ -144,6 +144,8 @@ header .ghost { margin-left: auto; }
 
 .modal-card {
   width: min(600px, 92vw);
+  max-height: 90vh;
+  overflow-y: auto;
   background: linear-gradient(180deg, rgba(24, 34, 47, 0.95), rgba(15, 22, 31, 0.95));
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -255,3 +257,96 @@ button.primary:hover { border-color: #6fb4ff; }
 @media (prefers-reduced-motion: reduce) {
   .victory-glow { animation: none; }
 }
+
+/* -- Task 17: geometric scale, difficulty tiers and score placeholder ---- */
+.hotbar .slot.offline { opacity: 0.45; }
+.hotbar .slot.offline span { text-decoration: line-through; }
+#sensor-offline { color: var(--warn); }
+
+
+/* -- Task 18: quest tracker + proof modal ------------------------------- */
+.quest-tracker {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: #101823;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.quest-tracker h3 { margin: 0 0 6px; display: flex; align-items: center; justify-content: space-between; }
+.quest-title { color: var(--text); font-size: 14px; margin-bottom: 4px; }
+.quest-progress-row { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; margin-top: 6px; }
+.quest-bar { height: 6px; border-radius: 999px; background: #0c1219; border: 1px solid var(--line); overflow: hidden; margin: 6px 0; }
+.quest-bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #4dabf7, #51cf66); transition: width 200ms ease; }
+.quest-seal { color: var(--warn); margin: 6px 0 0; }
+.quest-relics { color: var(--ok); font-size: 12px; margin-top: 6px; }
+
+.proof-card { border-color: rgba(77, 171, 247, 0.45); }
+#proof-canvas { background: #0a0f16; border: 1px solid var(--line); border-radius: 8px; margin: 10px 0; }
+.proof-steps { color: var(--muted); font-size: 12px; margin: 8px 0 0; padding-left: 20px; }
+.proof-steps li { margin: 4px 0; }
+
+
+/* -- Task 19: toolchain hotbar, rope HUD & codex ------------------------ */
+.hotbar .slot.locked { opacity: 0.5; }
+.hotbar .slot.locked::after {
+  content: "\1F512";
+  position: absolute;
+  top: 2px;
+  right: 6px;
+  font-size: 11px;
+}
+.measure-mode {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(12, 18, 26, 0.85);
+  z-index: 16;
+}
+.measure-mode button {
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.measure-mode button.active { border-color: var(--accent); color: var(--accent); }
+.codex-card { border-color: rgba(255, 214, 102, 0.45); }
+.codex-body { position: relative; }
+.codex-title { color: var(--text); font-size: 15px; margin: 4px 0; }
+.codex-hint {
+  color: var(--warn);
+  border-left: 3px solid var(--warn);
+  padding-left: 10px;
+  font-size: 12px;
+}
+.codex-relics { color: var(--ok); font-size: 13px; margin: 4px 0 10px; }
+
+
+/* -- Task 19 rework: top-left hint box ---------------------------------- */
+.viewport { position: relative; }
+.hint-box {
+  position: absolute;
+  top: 44px;
+  left: 24px;
+  max-width: min(360px, 60%);
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: rgba(10, 16, 24, 0.88);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+  z-index: 12;
+  pointer-events: none;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+}
+.hint-box.ok { border-left-color: var(--ok); }
+.hint-box.warn { border-left-color: var(--warn); }
+.hint-box.error { border-left-color: var(--error); }

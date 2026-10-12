@@ -178,8 +178,11 @@ class WorldConfig:
     randomize_surface: bool = True
     max_placement_attempts: int = 4000
     obstacle_count: int = 12
-    obstacle_radius: float = 1.2
-    obstacle_safe_margin: float = 6.0
+    obstacle_radius: float = 3.5
+    obstacle_safe_margin: float = 12.0
+    # Task 17: geometric scale S in [0.2, 10.0] and the difficulty tier.
+    scale_factor: float = 1.0
+    difficulty: str = "easy"
 
     def __post_init__(self) -> None:
         if not isinstance(self.domain, Domain):
@@ -201,8 +204,22 @@ class WorldConfig:
             raise ConfigError("WorldConfig.obstacle_radius must be > 0")
         if float(self.obstacle_safe_margin) < 0.0:
             raise ConfigError("WorldConfig.obstacle_safe_margin must be >= 0")
+        if not np.isfinite(float(self.scale_factor)) or not (0.2 <= float(self.scale_factor) <= 10.0):
+            raise ConfigError("WorldConfig.scale_factor must be within [0.2, 10.0]")
+        if str(self.difficulty).strip().lower() not in ("easy", "medium", "hard"):
+            raise ConfigError("WorldConfig.difficulty must be one of easy/medium/hard")
         if self.max_placement_attempts < 1:
             raise ConfigError("WorldConfig.max_placement_attempts must be >= 1")
+
+    @property
+    def scaled_obstacle_radius(self) -> float:
+        """Task 17: physical obstacle radius after the 1/S geometric scale."""
+        return float(self.obstacle_radius) / float(self.scale_factor)
+
+    @property
+    def scaled_obstacle_safe_margin(self) -> float:
+        """Task 17: start/exit clearance after the 1/S geometric scale."""
+        return float(self.obstacle_safe_margin) / float(self.scale_factor)
 
 
 def default_domain() -> Domain:

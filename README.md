@@ -470,6 +470,76 @@ class MyMap:
 - **提交封装**：`scripts/package_submission.py` 新增 `--output` 参数（默认仍是 `submission/`），
   可把 `src/`、`web/`、`tests/`、`docs/`、README、AI_USAGE、ai-logs、截图与 DEMO_LINK 打包为可复现产物；
   按 `AGENTS.md` 第 5.6 条，本轮以 `codex/*` 分支提交，由用户在主仓库手动合并。
+## 等比地图缩放、三阶难度与计分占位（Task 17）
+
+- **几何缩放 S（不重采样流形）**：`WorldConfig` / `GameplayConfig` 新增 `scale_factor`（0.2 - 10.0，默认 1.0）；
+  步长、视距（patch radius）、障碍物半径与安全边距、捕获半径统一按 `1/S` 缩放；前端本地物理（跑速、
+  玩家碰撞体半径）同步除以 S；尺度阶梯：Small 0.5 / Medium 1.0（默认）/ Large 2.0 / Extra Large 4.0 /
+  Custom 0.2 - 10.0；
+- **三阶难度**：
+  - Easy（默认）：距离探测器 + 末影光标 + 全部几何测量工具；
+  - Medium：距离探测器静默（`signal 0.0`、`label Offline`、`trend same`），前端 Slot 1 置灰并提示
+    `[Sensor Offline in Medium Mode]`；仍可用末影光标、曲率仪、测角仪与标记点推导拓扑；
+  - Hard：大厅标记 `[Reserved / Work in Progress]`，选中时给出明确提示；后端返回安全占位
+    （`Reserved`、无距离线索），保留后续动力/引力系统扩展槽；
+- **计分占位系统**：`ExplorationGame` 维护 `elapsed_time`、`effective_steps`（Σ `1/speed_scale` 的上坡加权步数）、
+  `tool_usages`（detector / pointer / curvature / triangle / marker）与 `calculate_score()`（当前返回 0 的扩展钩子）；
+  Web HUD 显示 `Score: 0`，胜利弹窗显示 `Final Score: 0`、难度与地图尺度；
+- **服务端契约**：`POST /api/session/new` 接受 `{map_id, seed, mode, scale, difficulty}`；
+  `/api/state/player`、`/api/action/move`、`/api/action/sync_position` 追加
+  `scale_factor / difficulty / score / effective_steps / tool_usages`（仍不泄露出口与真实距离）；
+- **回归**：新增 `tests/test_scaling_and_difficulty.py`（8 项），全量 167 项测试通过。
+
+## 几何印记任务、流形可行性扫描与推导弹窗（Task 18）
+
+- **流形可行性扫描器**（`src/the_curved_world/scanner.py`）：31x31 参数网格粗扫描并缓存
+  `k_max` / `k_min` / 平均曲率 / 是否存在 K 符号反转带 / 亏格（优先地图元数据，其次数值
+  Gauss-Bonnet 总曲率 chi = iint K dA）；并在正曲率峰值处用与游戏测角仪**同一** `tangent_angle`
+  例程测量一个可达参考三角形的角盈 `reference_excess`，作为任务阈值的物理依据（按 cache_key 缓存）；
+- **任务引擎**（`src/the_curved_world/quest.py`）：`GeometricQuest` 基类
+  （id / title / description / hint / is_applicable / target_value / evaluate）、
+  `GaussBonnetQuest` 与 `QuestManager`；按种子确定性抽取可用任务链（不适用的任务被过滤），
+  维护 active / completed / relics 与出口封印状态；
+- **Quest 1 — Gauss-Bonnet Angle Excess**：自适应阈值
+  `theta_target = 180deg + clamp(0.6 * dtheta_ref, min(20deg, 0.5*dtheta_ref), min(80deg, 0.85*dtheta_ref))`，
+  并保证 `180deg < theta_target < 180deg + dtheta_ref`（永不卡死）；玩家用 Slot 5 放置 3 个信标、
+  Slot 3 测角，达标即授予【曲率之钥 / Curvature Seal】；
+- **出口封印联动**：未集齐印记时 `won` 不会置真；靠近出口时 payload 返回
+  `exit_sealed` / `seal_contact`，前端显示 "Exit sealed - a geometric relic is missing."；
+  完成任务的瞬间若玩家正站在出口上，封印解除并立即判定胜利；
+- **推导动效弹窗与任务 HUD**：右侧新增 `#quest-tracker`（任务标题/说明、`Angle Sum: current/target`
+  进度条、数理提示、印记列表与封印警示）；`#proof-modal` 展示 5 步 Gauss-Bonnet 推导，
+  `#proof-canvas` 以独立 `requestAnimationFrame` 循环绘制呼吸膨胀、三边外凸的发光测地三角形
+  与顶点弧度扫描；`Accept Seal` 关闭并停止动画；
+- **信息边界**：任务与推导只使用曲率极值、角盈、拓扑摘要与玩家自己的标记，绝不含出口三维坐标
+  或真实距离；`/api/state/player`、`move`、`sync_position` 与测角工具响应均遵守该边界。
+
+## 有限绳索、复合量具、封印探测器与学院任务书（Task 19）
+
+- **底栏 5 槽重构**：`[1] Exit Detector` | `[2] Marker Peg` | `[3] Surveyor Rope` |
+  `[4] Measure Tool` | `[5] Quest Codex`；
+- **槽位 1 出口探测器封印**：未集齐几何印记时 `detector_locked=true`，槽位置灰并叠加锁链图标，
+  HUD 显示 `[Exit Detector Sealed - complete the geometric trials]`，使用时提示封印；
+  `scan` 工具返回 `signal 0.0 / label Sealed`，不泄露任何距离线索；印记集齐后自动恢复
+  距离共振与升降趋势（Medium / Hard 难度仍优先返回 Offline / Reserved）；
+- **槽位 2 标记桩**：点击地图在玩家脚下打下 `A/B/C...` 命名的标记信标，作为绳索端点；
+- **槽位 3 测绘绳索**（`src/the_curved_world/ropes.py`）：总长度池 300 m、单段上限 100 m
+  （按大尺度地图调整）；支持 `标记 <-> 标记`、`标记 <-> 障碍物`、`障碍物 <-> 障碍物`
+  （障碍物必须由服务端校验为当前视距内，避免探测未探索区域）；超长或绳池不足直接阻断并给出
+  英文提示；2D 地图上以紧绷细缆绘制（缆线 + 端点绑扎环 + 长度标签）；
+  **左键只用于选取路径点/连接**，剪断改为**右键点击绳索本身**并在左上角提示区按 `y` 确认、
+  `n` 取消（`C` 可请求全部剪断，同样需要确认），避免"在已连接点上再点一次就断绳"的误操作；
+- **槽位 4 复合测量仪**：`Length` / `Angle` 两种模式（`R` 键或胶囊按钮切换）；
+  Length 点击绳索实测长度（或依次点两个路径点测距）；Angle 点击连接了**恰好两条绳索**的
+  路径点只测量**该顶点**的夹角，必须依次测完闭合三角形的**三个顶点**后才会汇总内角和并触发
+  Quest 1 判定（也可依次选取 3 个标记桩测三角形内角和）；任务完成后会立即刷新状态，
+  出口探测器随之解除封印恢复距离共振；
+- **界面精简与提示区**：删除右侧遗留工具栏与结果卡（只保留底部 5 槽）；主视图左上角新增
+  `#hint-box`，无提示时隐藏，绳长 / 夹角 / 任务完成 / 探测器封印等结果出现时显示并约 7 秒后
+  自动隐藏；上帝模式沿用玩家模式的鼠标瞄准、滚轮换槽与工具点击；每个路径点最多绑定两条绳索；
+- **槽位 5 学院任务书**：`#codex-modal` 羊皮纸风格面板（任务总览、印记收集栏、隐秘学派提示），
+  点击槽位 5 或按 `J` 开合；绳索与量具 payload 只包含玩家已知节点，绝不泄露出口或真实距离。
+
 ## 目录结构
 
 ```
@@ -531,6 +601,12 @@ AI Empowered/
 | `src/the_curved_world/obstacles.py` | `Obstacle` / `ObstacleField`：两阶段散布、安全边距、周期接缝碰撞 |
 | `tests/test_obstacles.py`、`tests/test_first_person.py` | 障碍物确定性/安全边距/接缝碰撞；标架正交性与相对移动 |
 | `tests/test_obstacle_scale.py` | Task 16 放大后的障碍物尺度、四图生成成功与出生点/出口安全边距 |
+| `tests/test_scaling_and_difficulty.py` | Task 17 缩放律、难度静默/占位与计分输入 |
+| `src/the_curved_world/scanner.py` | Task 18 流形可行性扫描（K 极值、符号反转带、亏格、可达参考角盈） |
+| `src/the_curved_world/quest.py` | Task 18 任务基类 / Gauss-Bonnet 任务 / QuestManager（确定性任务链 + 出口封印） |
+| `tests/test_quest_engine.py` | Task 18 扫描器精度、阈值宽松度、任务完成与出口封印测试 |
+| `src/the_curved_world/ropes.py` | Task 19 有限绳索池（单段上限 / 总长池 / 节点合法性 / 长度回收） |
+| `tests/test_ropes_and_tools.py` | Task 19 绳索连接、超长拒绝、量角器任务联动与探测器封印测试 |
 
 ## 功能状态表
 
@@ -581,6 +657,19 @@ AI Empowered/
 | 所见即所撞的 2D 障碍物像素半径（Task 16） | `web/app.js` | ✅ 已完成 |
 | 通关结算弹窗 + 自由漫游 / Cleared HUD（Task 16） | `web/index.html`、`web/app.js`、`web/style.css` | ✅ 已完成 |
 | 障碍物尺度与安全边距回归测试（Task 16） | `tests/test_obstacle_scale.py` | ✅ 已完成 |
+| 等比地图缩放 S（1/S 物理缩放）（Task 17） | `src/the_curved_world/config.py`、`gameplay.py`、`server.py`、`web/app.js` | ✅ 已完成 |
+| 三阶难度（Easy / Medium / Hard 占位）（Task 17） | `src/the_curved_world/gameplay.py`、`server.py`、`web/` | ✅ 已完成 |
+| 计分输入与 Score: 0 占位（Task 17） | `src/the_curved_world/gameplay.py`、`server.py`、`web/` | ✅ 已完成 |
+| 缩放 / 难度 / 计分回归测试（Task 17） | `tests/test_scaling_and_difficulty.py` | ✅ 已完成 |
+| 流形可行性扫描器（Task 18） | `src/the_curved_world/scanner.py` | ✅ 已完成 |
+| 几何印记任务引擎与出口封印（Task 18） | `src/the_curved_world/quest.py`、`gameplay.py`、`server.py` | ✅ 已完成 |
+| Quest 1 Gauss-Bonnet 角盈 + 推导弹窗（Task 18） | `web/index.html`、`web/app.js`、`web/style.css` | ✅ 已完成 |
+| 任务引擎回归测试（Task 18） | `tests/test_quest_engine.py` | ✅ 已完成 |
+| 有限绳索系统（100 m 池 / 30 m 单段）（Task 19） | `src/the_curved_world/ropes.py`、`gameplay.py`、`server.py` | ✅ 已完成 |
+| 出口探测器封印与解锁（Task 19） | `src/the_curved_world/gameplay.py`、`server.py`、`web/app.js` | ✅ 已完成 |
+| 复合量具 Ruler / Protractor + Quest 联动（Task 19） | `src/the_curved_world/server.py`、`web/app.js` | ✅ 已完成 |
+| 5 槽测绘工具链与学院任务书（Task 19） | `web/index.html`、`web/app.js`、`web/style.css` | ✅ 已完成 |
+| 绳索 / 量具回归测试（Task 19） | `tests/test_ropes_and_tools.py` | ✅ 已完成 |
 
 ## 安装、运行与测试
 

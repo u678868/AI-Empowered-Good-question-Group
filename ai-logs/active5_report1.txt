@@ -1,0 +1,133 @@
+================================================================================
+The Curved World — Task 17 报告
+（process/active5.txt：等比地图缩放 / 三阶难度体系 / 计分机制占位）
+文件：report/active5_report1.txt
+日期：2026-10-12
+状态：本地完成；按项目规范【未 commit、未 push】（等待用户指令）
+================================================================================
+
+一、任务目标
+--------------------------------------------------------------------------------
+1. 多级等比地图缩放：S in {0.5, 1.0, 2.0, 4.0, custom 0.2-10.0}，通过物理感知的
+   1/S 缩放（步长 / 视距 / 障碍物半径与安全边距 / 捕获半径）实现，参数空间与流形
+   方程完全不动、不重新采样；
+2. 三阶难度：Easy（默认，探测器可用）、Medium（剥离距离探测器，依赖 Eye、曲率仪、
+   测角仪与标记点）、Hard（[Reserved / Work in Progress] 安全占位）；
+3. 计分占位：维护 elapsed_time、effective_steps（Σ 1/speed_scale）、tool_usages
+   （detector/pointer/curvature/triangle/marker）与 calculate_score()（当前返回 0）；
+   Web HUD 与胜利弹窗显示 Score: 0 / Final Score: 0。
+
+二、改动文件与功能
+--------------------------------------------------------------------------------
+1. src/the_curved_world/config.py
+   - WorldConfig 新增 scale_factor（0.2-10.0，默认 1.0）与 difficulty（easy/medium/hard）；
+   - 新增 scaled_obstacle_radius / scaled_obstacle_safe_margin 两个 1/S 属性；
+   - 原始默认障碍物半径/安全边距补齐为 3.5 / 12.0（见第五节修正说明）。
+
+2. src/the_curved_world/gameplay.py
+   - GameplayConfig 新增 scale_factor / difficulty 与 effective_capture_radius、
+     effective_player_radius、effective_eye_height；step_length 变为
+     move_speed * time_step / S；
+   - ExplorationGame 使用 effective_player_radius / effective_capture_radius；
+   - 新增 effective_steps、tool_usages、score 属性与 calculate_score()、
+     record_tool_usage() 扩展钩子；
+   - move() 与 sync_position() 都按 1/speed_scale 累计 effective_steps；
+   - Medium/Hard 下 _detector_silent()/_neutral_observation() 让 read_detector()、
+     peek_detector() 与 place_marker() 都拿到无距离线索的中立读数。
+
+3. src/the_curved_world/obstacles.py
+   - 生成时按 config.scale_factor 把基础半径与安全边距除以 S（不重采样流形）。
+
+4. src/the_curved_world/server.py
+   - GameSession 接受/校验 scale 与 difficulty；reset_world(map_id, seed, mode,
+     scale, difficulty) 生效；_build() 用 dataclasses.replace 注入 scale/difficulty；
+   - effective_patch_radius 除以 S；
+   - _observation_payload：Medium 返回 signal 0.0 / label Offline / trend same；
+     Hard 返回 Reserved 占位；
+   - 新增 _scoring_payload：scale_factor / difficulty / difficulty_reserved / score /
+     effective_steps / tool_usages，注入 player_state / move / sync_position；
+   - POST /api/session/new 接收 {map_id, seed, mode, scale, difficulty}；
+   - tool("scan") 在 Medium/Hard 下同样返回 Offline/Reserved 占位，不泄露真实信号。
+
+5. web/index.html / web/style.css / web/app.js
+   - 大厅新增 "Map size (geometric scale)" 下拉（Small 0.5 / Medium 1.0 / Large 2.0 /
+     Extra Large 4.0 / Custom...）与 Custom 数字输入（选中才展开）；
+   - 大厅新增 "Difficulty" 单选（Easy / Medium / Hard [Reserved / Work in Progress]），
+     选中 Medium/Hard 时显示明确提示；
+   - HUD 新增 Score: 0、Map scale、Difficulty 读数；Medium 下 Slot 1 置灰
+     （.offline）并显示 [Sensor Offline in Medium Mode]；点击罗盘直接提示不变更状态；
+   - 胜利弹窗新增 Difficulty / Map scale / Final Score: 0 三项；
+   - 客户端本地物理（跑速、玩家碰撞体半径）同步除以 S，障碍物绘制/碰撞仍同源；
+   - 大厅模态框加 max-height: 90vh + overflow-y: auto（新增字段后小窗口可滚动）。
+
+6. tests/test_scaling_and_difficulty.py（新增 8 项）
+   - 步长/捕获/玩家半径的 1/S 缩放律；WorldConfig 障碍半径与边距缩放；
+     GameSession 的 step/patch/obstacle 缩放；Medium 探测器静默（含 scan 工具）；
+     Hard 安全占位且仍可移动；非法 scale/difficulty 拒绝；计分输入累计；默认配置基线。
+
+三、测试命令与结果
+--------------------------------------------------------------------------------
+1. 全量后端测试（167 项 = 原 159 + 新增 8）：
+   命令：.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
+   结果：exit code 0；进度 72 + 72 + 23 = 167 个点全部通过。
+
+2. 前端语法：node --check web\app.js  -> exit 0
+3. 中文扫描：web/index.html、web/app.js、web/style.css 均无匹配（纯英文 UI）。
+
+4. 浏览器自测（.\.venv\Scripts\python.exe -m src.main --serve --port 8123 --debug）：
+   a) Large 2.0x + Easy：HUD 显示 2.00x / Easy / Score 0，探测器正常
+      （signal 0.0106 Weak），按住 W 后位置从 (-1.67,-1.00) 移动到 (-0.80,-1.00)；
+   b) Medium：HUD 显示 Medium，探测器 "signal 0.0000 (Offline, same)"，
+      #sensor-offline 可见，Slot 1 类名 "slot active offline"，
+      点击画布提示 "[Sensor Offline in Medium Mode]"（不发起扫描请求）；
+   c) Hard：选中时提示 "Hard is [Reserved / Work in Progress] - entering uses a safe
+      placeholder with the detector offline."，进入后 HUD 显示 "Hard (reserved)"、
+      探测器 "signal 0.0000 (Reserved, same)"，仍可正常移动；
+   d) Custom：选择 Custom 后自定义输入框展开，S=1.5 进入后 HUD 显示 1.50x；
+   e) 胜利弹窗：注入出口后弹窗显示 Difficulty "Hard (reserved)"、Map scale "1.50x"、
+      Final Score "0"；
+   f) 以上 4 次浏览器测试 dev.logs 均为空（无 JS 报错）。
+
+5. 服务端 API 复核（HTTP）：
+   - S=1.5 时 patch radius = 0.9215（基准 1.3823 / 1.5）；
+   - 注入出口后 won=true，score=0.0，effective_steps=1.106008；
+   - tool_usages 在 move/read_detector/place_marker/release_pointer/curvature 后分别为
+     {'detector':1,'pointer':1,'curvature':1,'triangle':0,'marker':1}。
+
+四、设计要点（与规范逐条对应）
+--------------------------------------------------------------------------------
+- 缩放律：step=base/S、R_view=base/S、r_obs=base/S、r_capture=base/S；参数空间与
+  流形方程不变。Small(0.5) 视野更广、移动更快；Large(4.0) 视野更窄、行进旷远。
+- Medium 静默在 gameplay 层与 server 层双重生效：玩家可见的 read/peek/marker 与
+  scan 工具都只返回 signal 0.0 / Offline / same，杜绝通过信号爬山；
+- Hard 与 Medium 一样不提供距离线索，但额外带 difficulty_reserved=true，作为
+  后续动力系统/引力源的扩展槽位；
+- 计分输入真实累计（effective_steps 含上坡 1/speed_scale 加权），score 仍为 0 的
+  显式占位，方便后续替换公式而不改动接口。
+
+五、Task 16 提交产物的默认值修正说明（诚实记录）
+--------------------------------------------------------------------------------
+Task 16 报告声称 WorldConfig 原始默认 obstacle_radius/safe_margin 由 1.2/6.0 提升到
+3.5/12.0；但实际推送的 codex/task16-packaging（commit 22633bb）中，四张地图的 placement
+已放大（4.2/45、2.4/12、4.5/12、4.5/16），而 WorldConfig 原始默认值仍是 1.2/6.0。
+本轮 Task 17 已把该原始默认值补齐为 3.5/12.0（并同时加入 scale_factor/difficulty），
+使当前工作区与 Task 16 报告描述一致；该差异在此如实记录，不修改既有 report 文件。
+
+六、已知限制
+--------------------------------------------------------------------------------
+1. calculate_score() 目前固定返回 0（规范要求占位），尚无评分公式；
+2. Hard 为 Reserved 占位：行为等同"静默 + 允许移动"，没有额外动力/引力机制；
+3. 按规范只缩放 step/view/obstacle/capture 四项，detector_scale 与 pointer_sectors
+   不随 S 变化；
+4. Medium 的标记点 signal/label 为中立值（signal 0.0 / Weak），不携带距离信息；
+5. 本地客户端在缩放地图上的移动速度与服务器步长仍按同一 1/S 律（playwright 后台
+   标签页 rAF 降频时自动化移动会偏慢，真实聚焦游玩为 60FPS）。
+
+七、Git 状态与建议
+--------------------------------------------------------------------------------
+- 本任务改动全部在工作区，未 commit / 未 push（AGENTS.md 第 5 节：仅按指令推送）；
+- 建议提交信息：feat(gameplay): geometric map scaling, 3-tier difficulty modes and score placeholder；
+- 若推送分支，建议从已推送的 codex/task16-packaging 继续叠加（Task 16 尚未合并），
+  或等 Task 16 合并后从 main 新建 codex/task17-scaling-difficulty；
+- 合并仍由用户在 GitHub 手动完成，Codex 不推 main、不使用 --force。
+================================================================================

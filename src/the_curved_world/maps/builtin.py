@@ -29,6 +29,7 @@ from src.the_curved_world.maps import (
     ),
     topology=CLOSED_PERIODIC,
     placement={"min_separation": 70.0, "boundary_margin": 0.0, "detector_scale": 60.0, "obstacle_count": 30, "obstacle_radius": 4.2, "obstacle_safe_margin": 45.0},
+    genus=1,
 )
 class TorusGenusOneMap:
     def build(self, params):
@@ -44,6 +45,7 @@ class TorusGenusOneMap:
     ),
     topology=CLOSED_PERIODIC,
     placement={"min_separation": 14.0, "boundary_margin": 0.0, "detector_scale": 13.0, "obstacle_count": 8, "obstacle_radius": 2.4, "obstacle_safe_margin": 12.0},
+    genus=0,
 )
 class EllipsoidGenusZeroMap:
     def build(self, params):
@@ -60,6 +62,7 @@ class EllipsoidGenusZeroMap:
     ),
     topology=CLOSED_PERIODIC,
     placement={"min_separation": 10.0, "boundary_margin": 0.0, "detector_scale": 11.0, "obstacle_count": 16, "obstacle_radius": 4.5, "obstacle_safe_margin": 12.0},
+    genus=1,
 )
 class DoubleTorusMap:
     def build(self, params):
@@ -75,6 +78,7 @@ class DoubleTorusMap:
     ),
     topology=BOUNDED_PLANE,
     placement={"min_separation": 25.0, "boundary_margin": 3.0, "detector_scale": 25.0, "obstacle_count": 18, "obstacle_radius": 4.5, "obstacle_safe_margin": 16.0},
+    genus=None,
 )
 class PlanarLandscapeMap:
     def build(self, params):
