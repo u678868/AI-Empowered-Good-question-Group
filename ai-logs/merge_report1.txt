@@ -86,6 +86,12 @@ web/style.css、AI_USAGE.md 与上游新增文件。
 - 远端校验：git ls-remote 显示 refs/heads/codex/four-maps-integration = bff80b6（与本地一致）
 - 未推 main：遵循仓库既有约定（以 codex/* 分支提交，由维护者在 GitHub 合并）。
   该分支包含 origin/main，故 PR 可直接快进合并。
+- 实测印证：直接执行 `git push`（默认推当前分支的上游 = main）被 GitHub 分支保护规则拒绝：
+    remote: error: GH013: Repository rule violations found for refs/heads/main
+    remote: - Changes must be made through a pull request.
+    ! [remote rejected] main -> main (push declined due to repository rule violations)
+  即本仓库确实要求 main 只能经 PR 合并；因此本轮改为
+  `git push origin main:codex/four-maps-integration`，只更新 codex/* 分支，不触碰 main。
 
 七、本次回合增补的文件
 --------------------------------------------------------------------------------
