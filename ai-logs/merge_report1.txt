@@ -1,0 +1,105 @@
+================================================================================
+The Curved World — 拉取/合并/上传报告（本地分支集成回合）
+文件：ai-logs/merge_report1.txt
+基线：origin/main = 30dec65（上游 playable v1 release）
+结果：main = bff80b6（含合并与三处修复），分支 codex/four-maps-integration 已推送
+================================================================================
+
+一、结论摘要
+--------------------------------------------------------------------------------
+1. 上游 main 前进了一个完整 release（21 文件、+3559 行）：等比缩放与三阶难度、
+   几何印记任务引擎与出口封印、流形可行性扫描器、有限绳索与复合量具、Web 工具链重构。
+2. 本次工作（四张新流形 + 距离策略 + chart 副本契约）先提交到
+   codex/task17-task18-maps（c8ff1f3）保底，再把 main 快进到上游，最后合并本地分支
+   （241cb66），7 处冲突全部按"双方特性都保留"解决，无内容丢失。
+3. 合并后修复三处问题：合并冲突遗留的 config.py 缩进错误、上游删除 hideCard 导致
+   "hideCard is not defined"、上游新增 sync_position 的 2π 硬折回在扭曲 chart 上语义错误。
+4. 测试：全量 233 项通过（仓库基线 159 项；本次两轮共新增 48 项
+   —— 克莱因瓶 17 + 四张新地图 31；合并进来的上游新增 26 项）。
+5. 上传：分支 codex/four-maps-integration（tip bff80b6）已推送；未推 main（遵循仓库约定）。
+
+二、网络问题与处理
+--------------------------------------------------------------------------------
+- 现象：git fetch 报 "schannel: failed to receive handshake, SSL/TLS connection failed"；
+  TCP 443 可连（Test-NetConnection=True），换 OpenSSL 后端报
+  "unexpected eof while reading"，系统自带 curl 同样失败 —— 典型 TLS 握手被切断。
+- 定位：用户本机代理监听 127.0.0.1:7890，但 git 未配置代理（http.sslBackend=schannel，
+  无 proxy 配置）。配好代理后一次通过。
+- 处理：仅在**本仓库**设置 `git config --local http.proxy http://127.0.0.1:7890`，
+  未改全局配置；撤销命令：`git config --local --unset http.proxy`。
+- 推送鉴权由系统 Git Credential Manager 提供，无需交互。
+
+三、合并过程与冲突解决
+--------------------------------------------------------------------------------
+步骤：
+  1) git switch -c codex/task17-task18-maps；git add -A；提交 c8ff1f3（保底，绝不丢工作）
+  2) git switch main；git merge --ff-only origin/main（604efa3 -> 30dec65）
+  3) git merge codex/task17-task18-maps -> 7 处冲突
+
+冲突与解决（均为"保留双方"）：
+  config.py            上游 scale_factor/difficulty 默认值 + 本分支 distance_mode
+                       （顺带修复：本分支的模块常量被夹进类体导致 IndentationError）
+  maps/__init__.py     上游 genus + 本分支 non_orientable（字段/装饰器参数/to_dict 三处）
+  gameplay.py          上游出口封印与 effective_capture_radius + 本分支世界距离策略
+  obstacles.py         上游 1/S 物理缩放 + 本分支距离策略（散布与碰撞）
+  server.py            上游 quest/ropes/scoring 载荷 + 本分支 chart_copies 载荷
+  web/app.js           上游 project/hitNodes/hitRopes + 本分支 chartDelta 投影
+  README.md            双方章节都保留 + 编号说明（两份工作线都用了 "Task 17/18"）
+
+自动合并成功（无需人工）：maps/builtin.py、tests/test_server.py、web/index.html、
+web/style.css、AI_USAGE.md 与上游新增文件。
+
+四、合并后的三处修复
+--------------------------------------------------------------------------------
+1) config.py 缩进错误（合并产物）
+   DISTANCE_MODES 等模块级常量落在类体中间 -> 全部 27 个测试模块收集失败
+   （IndentationError: unexpected indent）。已把常量移到类定义之后。
+
+2) hideCard is not defined（用户报告："无论选什么都会提示"）
+   根因：上游 release 删除了工具栏/结果卡 UI（连同 hideCard 函数），而冲突解决时保留了
+         本分支在 enterWorld() 里的 hideCard() 调用 -> 每次从大厅进入世界都抛异常。
+   修复：删除该调用，保留同处的 state.debugState = null（上帝视角修复）。
+   验证方式升级（原先只跑 node --check，查不出未定义调用）：
+     - node 侧静态扫描：提取全部被调用标识符与定义比对，现仅剩字符串字面量误报；
+     - 无头 Edge 跑真实流程：进入世界 / 快捷槽 1-5 / 上帝视角 / Esc / 重开大厅换图重进，
+       三种配置 + 重进流程，TOTAL ERRORS = 0。
+
+3) sync_position 的 2π 硬折回（上游新增代码的语义接缝）
+   上游用 wrap_parameter(du) 按 2π 折回增量；克莱因瓶 u 周期是 4π、射影平面有 4 层 chart
+   -> 语义错误。改为向 chart 要最近代表 chart_relative()，保留原兜底分支。
+
+五、合并后完整性核查
+--------------------------------------------------------------------------------
+- 上游 28 个章节标题、本分支 27 个，合并后 30 个：双向均无缺失。
+- 上游 151 条 README 表格行中仅 3 条与合并结果不同，且均为有意更新
+  （地图目录 4->9、obstacles.py 行补距离策略、manifold.py 行列出新模型），非内容丢失。
+- 上游 26 项新测试全部通过；服务器端到端 9 张地图、载荷字段齐全、无出口泄露。
+
+六、上传
+--------------------------------------------------------------------------------
+- 分支：codex/four-maps-integration（本地 main 的 tip，bff80b6）
+- 提交链（均在 origin/main 之上）：
+    bff80b6 fix(web): drop the call to hideCard(), which upstream deleted
+    c411009 chore(maps): declare the orientable genus for the new knot and elliptic-curve levels
+    241cb66 Merge branch 'codex/task17-task18-maps' into main
+    c8ff1f3 feat(maps): four new manifolds, configurable distance policy and chart-copy contract
+- 远端校验：git ls-remote 显示 refs/heads/codex/four-maps-integration = bff80b6（与本地一致）
+- 未推 main：遵循仓库既有约定（以 codex/* 分支提交，由维护者在 GitHub 合并）。
+  该分支包含 origin/main，故 PR 可直接快进合并。
+
+七、本次回合增补的文件
+--------------------------------------------------------------------------------
+新增：
+  docs/work_report.md            （整轮工作的汇总报告：交付物、实测、合并、边界、复现）
+  ai-logs/merge_report1.txt      （本文件）
+修改：
+  web/app.js                     （删除 hideCard 调用）
+  src/the_curved_world/config.py （合并产物缩进修复）
+  src/the_curved_world/gameplay.py（sync_position 走 chart_relative）
+  src/the_curved_world/maps/builtin.py（两张可定向新图声明 genus=1）
+
+八、复现命令
+--------------------------------------------------------------------------------
+  .\.venv\Scripts\python.exe -m pytest                      # 233 项
+  git log --oneline --graph -6
+  git diff --stat origin/main..codex/four-maps-integration

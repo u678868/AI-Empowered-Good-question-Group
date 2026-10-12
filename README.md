@@ -826,6 +826,7 @@ AI Empowered/
 | `tests/test_bottle_klein.py` | Task 18：与公开瓶形公式逐点一致（8.9e-16）、扭转识别、自交、χ=0、网格闭合 |
 | `tests/test_elliptic_curve.py` | Task 18：共形模数 τ=i 与数值积分互证、非平坦性、窄孔近邻、非法形变被拒 |
 | `tests/test_projective_plane.py` | Task 18：两个对合恒等式、4 层 chart、8π/2π 高斯-博内、`orbit_min` 距离策略与其它地图的回归 |
+| `docs/work_report.md` | 本轮工作总结报告：交付物、实测数字、上游合并记录、诚实边界、复现命令 |
 
 ## 功能状态表
 
