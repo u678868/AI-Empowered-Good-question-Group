@@ -105,6 +105,7 @@ class KleinBottleMap:
         "strands apart, which is the whole puzzle."
     ),
     topology=CLOSED_PERIODIC,
+    genus=1,
     placement={"min_separation": 60.0, "boundary_margin": 0.0, "detector_scale": 30.0, "obstacle_count": 24, "obstacle_radius": 3.0, "obstacle_safe_margin": 20.0},
 )
 class KnotGardenMap:
@@ -144,6 +145,7 @@ class TraditionalKleinMap:
         "the fat tube and the narrow hole put many near-strands close together in R^3."
     ),
     topology=CLOSED_PERIODIC,
+    genus=1,
     placement={"min_separation": 60.0, "boundary_margin": 0.0, "detector_scale": 45.0, "obstacle_count": 28, "obstacle_radius": 4.0, "obstacle_safe_margin": 30.0},
 )
 class EllipticCurveMap:
