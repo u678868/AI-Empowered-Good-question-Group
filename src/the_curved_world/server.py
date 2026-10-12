@@ -13,6 +13,7 @@ exists when the server is started with ``debug=True``.
 from __future__ import annotations
 
 import json
+import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -111,6 +112,7 @@ class GameSession:
             "mode": self.mode,
             "seed": self._game.summary().seed,
             "periodic": bool(getattr(self._game.player_view.surface, "periodic", False)),
+            **self._chart_payload(),
         }
 
     def _build(self, seed: Optional[int]) -> ExplorationGame:
@@ -133,6 +135,31 @@ class GameSession:
             "x_max": _round(domain.x_max),
             "y_min": _round(domain.y_min),
             "y_max": _round(domain.y_max),
+        }
+
+    def _chart_payload(self) -> Dict[str, Any]:
+        """How the chart identifies its own points (periods and sheets).
+
+        The front-end must wrap parameter deltas exactly the way the kernel
+        does. That is ``2 pi`` per axis for the torus-like charts, but the Klein
+        bottle needs ``4 pi`` in ``u`` because a ``2 pi`` shift there mirrors
+        ``v`` -- and it carries two chart copies of every surface point. The
+        projective plane carries four. ``chart_copies`` publishes those sheets as
+        ``[du, dv, flip_v]`` triples so the browser never has to guess.
+
+        This payload stays purely geometric: it says nothing about the hidden
+        exit.
+        """
+        surface = self._game.player_view.surface
+        periods = getattr(surface, "chart_periods", None)
+        period_u, period_v = periods() if callable(periods) else (2.0 * math.pi, 2.0 * math.pi)
+        transforms = getattr(surface, "chart_copy_transforms", None)
+        copies = transforms() if callable(transforms) else ((0.0, 0.0, False),)
+        return {
+            "twisted": bool(getattr(surface, "twisted", False)),
+            "orientable": bool(getattr(surface, "orientable", True)),
+            "chart_periods": [_round(period_u), _round(period_v)],
+            "chart_copies": [[_round(du), _round(dv), bool(flip)] for du, dv, flip in copies],
         }
 
     def _observation_payload(self) -> Dict[str, Any]:
@@ -190,8 +217,9 @@ class GameSession:
         point = np.asarray(self._game.player_view.position(position), dtype=float)
         visible: List[Dict[str, Any]] = []
         for obstacle in field.obstacles:
-            delta = np.asarray(obstacle.position_3d, dtype=float) - point
-            distance = float(np.linalg.norm(delta))
+            # Measured with the world's own distance policy, so a quotient world
+            # (projective plane) treats an antipodal twin as the same place.
+            distance = field.nearest_realization(point, obstacle)[1]
             if distance > radius:
                 continue
             visible.append({**obstacle.to_dict(), "distance": _round(distance)})
@@ -212,6 +240,7 @@ class GameSession:
             "map_id": self.map_id,
             "mode": self.mode,
             "domain": self._domain_payload(),
+            **self._chart_payload(),
             "position": [_round(position[0]), _round(position[1])],
             "position3d": [_round(v) for v in position3d],
             "curvature": _round(game.curvature(), 8),
@@ -355,6 +384,7 @@ class GameSession:
             "slope": {key: _round(value, 6) for key, value in self._game.last_slope.items()},
             "patch": patch,
             "obstacles": self._visible_obstacles(patch, result.position),
+            **self._chart_payload(),
             **self._observation_payload(),
         }
     def step_action(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -383,6 +413,7 @@ class GameSession:
                 "yaw": _round(self._game.yaw, 6),
                 "position": [_round(self._game.position[0]), _round(self._game.position[1])],
                 "position3d": [_round(v) for v in position3d],
+                **self._chart_payload(),
                 **self._observation_payload(),
             }
 

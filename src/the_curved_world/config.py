@@ -180,6 +180,16 @@ class WorldConfig:
     obstacle_count: int = 12
     obstacle_radius: float = 1.2
     obstacle_safe_margin: float = 6.0
+    #: How the world measures distance between two places:
+    #:
+    #: * ``"euclidean"`` (default) -- plain ambient Euclidean distance between
+    #:   the two 3D realizations of the player and the target;
+    #: * ``"orbit_min"`` -- minimum over the chart copies of both places. A
+    #:   quotient world such as the real projective plane needs this, because a
+    #:   single place there has two antipodal 3D realizations and the honest
+    #:   distance is the nearer one. Every other map keeps the default, so its
+    #:   behaviour is bit-for-bit unchanged.
+    distance_mode: str = "euclidean"
 
     def __post_init__(self) -> None:
         if not isinstance(self.domain, Domain):
@@ -203,6 +213,16 @@ class WorldConfig:
             raise ConfigError("WorldConfig.obstacle_safe_margin must be >= 0")
         if self.max_placement_attempts < 1:
             raise ConfigError("WorldConfig.max_placement_attempts must be >= 1")
+        if self.distance_mode not in DISTANCE_MODES:
+            raise ConfigError(
+                f"WorldConfig.distance_mode must be one of {DISTANCE_MODES}, got {self.distance_mode!r}"
+            )
+
+
+#: Supported distance policies; see :attr:`WorldConfig.distance_mode`.
+DISTANCE_EUCLIDEAN = "euclidean"
+DISTANCE_ORBIT_MIN = "orbit_min"
+DISTANCE_MODES = (DISTANCE_EUCLIDEAN, DISTANCE_ORBIT_MIN)
 
 
 def default_domain() -> Domain:

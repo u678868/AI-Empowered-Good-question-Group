@@ -1,0 +1,153 @@
+================================================================================
+The Curved World — Task 18 报告
+（四张新地图：打结环面 / 瓶形克莱因瓶 / 椭圆曲线 / 射影平面）
+文件：ai-logs/task18_report1.txt
+基线：Task 17（克莱因瓶关卡）之后
+================================================================================
+
+一、结论摘要
+--------------------------------------------------------------------------------
+1. 新增 4 张可玩地图，全部通过"显式解析 chart + 解析一二阶偏导"的既有硬约束：
+     knot_garden                打结环面（(2,3) 环面结的管道）
+     klein_bottle_traditional   经典瓶形克莱因瓶浸入
+     elliptic_curve             椭圆曲线 ℂ/(ℤ+iℤ) 的共形模型
+     projective_plane           实射影平面 RP²（对跖世界，唯一使用 orbit_min 距离）
+2. 引擎只做了一处语义扩展：可配置距离策略 WorldConfig.distance_mode
+   （默认 "euclidean"，其余地图行为逐位不变；RP² 用 "orbit_min"）。
+3. chart 副本契约从"前端写死 (u+2π,-v)"升级为内核数据驱动下发
+   （chart_copies: [[du,dv,flip],...]），RP² 的 4 层与瓶形克莱因瓶的扭转都能正确表达。
+4. 测试：pytest 全量 **207 项通过**（Task 17 后 176 项 + 新增 31 项）。
+   node --check web/app.js 通过；前端 chart 契约用真实 payload 逐图核对通过；
+   四张新地图均在无头 Edge 中实跑（top-down 与上帝视角均有绘制、无 JS 报错）。
+5. 未提交/未推送：本轮只在本地工作区完成。
+
+二、四张地图的数学与实测
+--------------------------------------------------------------------------------
+1) 打结环面 knot_garden（KnottedTorus）
+   构造：载环面 R=30,a=10；theta=2u, phi=3u；
+         K = ((R+a cos φ)cos θ, (R+a cos φ)sin θ, a sin φ)
+         标架 N=(cos φ cos θ, cos φ sin θ, sin φ)，E=∂/∂φ 方向（单位）
+         r = K + ρ(cos v N + sin v E)，ρ=8
+   偏导：r_u=K'+ρ(cos v N'+sin v E')，r_v=ρ(-sin v N+cos v E)，
+         r_uu=K''+ρ(cos v N''+sin v E'')，r_uv，r_vv 全部初等解析。
+   实测：min(EG-F²)=36864，||K dA=-3.6e-15（χ=0），
+         与中心差分误差一阶 ~1.4e-8、二阶 ~1.3e-5，
+         股间中心距 20.0（构造期校验 ρ < 股距/2），
+         两股表面最近约 12.0（< detector_scale=30）→ 探测器无法区分两股。
+   诚实性：结属于**嵌入**而非拓扑；曲面仍是可定向亏格 1。
+   过程中修正：_knot_strand_gap 初版只做粗网格扫描，会高估股距（20 vs 真值附近），
+   已加坐标下降局部细化 + "滑回同股"保护，宁可保守也不放过自交管。
+
+2) 经典瓶形克莱因瓶 klein_bottle_traditional（BottleKleinBottle）
+   公式：维基百科"Bottle shape"参数化（已逐字核对 action=raw 的维基源码）。
+   重参数化：U=2u, w=v-π/2  =>  r(U+2π, w) = r(U, -w)，周期 (4π,2π)，两层 chart。
+   偏导：轮廓 x=A1(u)cos v+A0(u)、y=B1(u)cos v+B0(u)、z=C1(u)sin v，
+         多项式写成 (cos u, sin u) 的指数字典，由 _poly_derivative 符号求导
+         （d/du C^i S^j = -i C^(i-1)S^(j+1) + j C^(i+1)S^(j-1)），再按 1/2^k 缩放。
+   实测：与逐字抄写的参考实现最大偏差 **8.9e-16**；
+         min(EG-F²)=0.0094（真浸入），||K dA=-3.4e-16（χ=0）；
+         自交真实存在（参数相距 2.18 的两点三维重合，误差 < 0.01）；
+         sample_grid 的 u 边闭合（r(2π,w)=r(0,-w)）。
+   诚实性：与 Task 17 的 figure-8 浸入分属三个正则同伦类中的两个（figure-8 手性、
+         传统瓶形非手性）；R³ 中不可嵌入。
+   过程中修正：sample_grid 初版把 U 的范围写成 [0,π]（只覆盖 1/4 曲面），
+         渲染出"开口管子"才发现；已修正为 [0,2π] 并渲染比对公开公式的网格。
+
+3) 椭圆曲线 elliptic_curve（EllipticCurveTorus，继承 DeformedTorus）
+   构造：环半径:管半径 = sqrt(2):1 的旋转环面（= Clifford 环面的球极投影）。
+   共形坐标：w(v)=∫ r dv/(R+r cos v)，周期 W=2πr/sqrt(R²-r²)，
+             共形模数 τ = i·r/sqrt(R²-r²)；R/r=sqrt2 时 **τ = i**（正方形格）。
+   实测：W 的公式与数值积分相对误差 0；(3,1)→0.353553i、(5,2)→0.436436i 亦逐位一致；
+         min(EG-F²)=5.9e5，||K dA=3.1e-15；孔半径/管半径=0.414（胖管窄孔）。
+   诚实性：只是**共形**模型，非等距嵌入（R³ 中不存在完备平坦闭曲面，Hilbert）；
+         紧黎曼曲面上不存在非常值全纯函数，所以"复分析"体现在共形结构。
+   校验：环管比不等于 sqrt2、或带任何径向形变（会破坏共形模数）→ 构造期报错。
+
+4) 实射影平面 projective_plane（ProjectivePlane，继承 DeformedEllipsoid）
+   两个恒等式：r(u+π,-v)=r(u,v)（chart 双重覆盖，同一三维点）
+               r(u+π,π-v)=-r(u,v)（对跖映射）
+   要求：径向调制关于 v 偶且关于 π/2 对称（即 cos(2k v)，等价偶数阶+相位 π/2），
+         否则商空间不是 RP² → 构造期报错。
+   chart：4 层副本 (0,0,F)、(π,0,T)、(π,π,T)、(0,π,F)；折叠成 2 个互为对跖的三维实现。
+   实测：原始 ||K dA=25.1168 ≈ 8π=25.1327（4 个世界副本 × 2π，χ(RP²)=1）。
+   玩法：世界距离 = 轨道最小。
+
+三、引擎改动：距离策略（唯一语义扩展）
+--------------------------------------------------------------------------------
+1) config.py：WorldConfig.distance_mode ∈ {"euclidean","orbit_min"}，默认 euclidean；
+   maps/__init__.py 的 world_config_for 支持 placement["distance_mode"]。
+2) geometry.py：world_distance(surface, p, q, mode) —— orbit_min 时对双方 chart 副本取最小，
+   无副本的曲面回退为欧氏距离。
+3) world.py：WorldState 增加 distance_mode；ambient_distance 走策略；
+   DebugView.distance_to_exit / exit_realizations 走策略；
+   generate() 在 orbit_min 时把出口的**全部实现**交给探测器；
+   _place_exit 的 min_separation 也走策略（否则出口可能落在出生的对跖点上=同一处）。
+4) detector.py：Detector 接受多个目标点（同一出口的多个实现），读数取最近者；
+   单点输入行为与改动前完全一致。
+5) gameplay.py：胜利判定、标记测距、指向器方位全部改走世界的距离策略。
+6) obstacles.py：ObstacleField 记住 distance_mode；新增 nearest_realization()，
+   碰撞判定/可见性/雷达邻域/滑动碰撞/散布时的安全边距全部使用它。
+7) server.py：_visible_obstacles 走 nearest_realization。
+   —— 其它地图 distance_mode="euclidean"，nearest_realization 直接返回存储的三维点，
+   行为与改动前逐位一致（有回归测试逐图断言"世界距离 == 朴素三维距离"）。
+
+四、chart 副本契约升级（数据驱动）
+--------------------------------------------------------------------------------
+1) manifold.py：ClosedManifold.chart_copy_transforms() 返回 ((du,dv,flip_v),...)，
+   chart_copies / chart_relative / orbit_positions 全部由它派生。
+   KleinBottle(4π,2π)+1 层折叠、BottleKleinBottle 同形、ProjectivePlane 4 层。
+2) server.py：_chart_payload 下发 chart_copies（[[du,dv,flip],...]）。
+3) web/app.js：chartCopies() 改为照抄 payload（保留 twisted 回退），chartDelta 自动支持 4 层。
+   —— node 侧用四张新图的真实 payload 核对：瓶形克莱因瓶的翻转层、RP² 的对跖层
+      都能被识别为零位移，且真正不同的地点不会被折叠。
+
+五、测试（新增 31 项，全量 207 项通过）
+--------------------------------------------------------------------------------
+  tests/test_knotted_torus.py      7 项：正则浸入、解析偏导、周期方块、χ=0、
+                                    涨结股距/嵌入性、非法参数、其它结型与注册可玩
+  tests/test_bottle_klein.py       7 项：与公开公式一致、扭转非平移、两层同点、
+                                    正则+自交、χ=0、网格闭合、非法 scale、双克莱因区分
+  tests/test_elliptic_curve.py     6 项：τ=i、模数公式 vs 数值积分、χ=0、
+                                    非平坦（Hilbert）、窄孔近邻、非法形变、注册可玩
+  tests/test_projective_plane.py   7 项：两个对合、4 层/2 实现、8π 与 2π、
+                                    调制约束、轨道距离语义（含胜利与探测器）、
+                                    标记/障碍物遵循策略、其它地图回归、注册
+  另：tests/test_map_registry.py（9 图列表、9 个不同曲面类、"直线行走可能被障碍物挡住"改为诚实断言）、
+      tests/test_server.py（/api/maps 列表）、tests/test_obstacle_scale.py（4 张新图半径）。
+
+六、无头浏览器实测（四图各一次，窗口 1500x1500）
+--------------------------------------------------------------------------------
+  knot_garden               copies=1  top-down 300275 px  god 111307 px  model 正确  sync ok
+  klein_bottle_traditional  copies=2  top-down 299711 px  god  70681 px  model 正确  sync ok
+  elliptic_curve            copies=1  top-down 307050 px  god 132960 px  model 正确  sync ok
+  projective_plane          copies=4  top-down 299576 px  god 119359 px  model 正确  sync ok
+  四图均无 JS 异常，上帝视角与局部地图都有实际绘制。
+
+七、文件清单
+--------------------------------------------------------------------------------
+修改：
+  src/the_curved_world/manifold.py      （4 个新模型 + chart_copy_transforms + 股距细化）
+  src/the_curved_world/config.py        （distance_mode + 常量与校验）
+  src/the_curved_world/geometry.py      （world_distance 策略入口）
+  src/the_curved_world/world.py         （WorldState.distance_mode、探测器多目标、出口放置策略）
+  src/the_curved_world/detector.py      （多目标探测器）
+  src/the_curved_world/gameplay.py      （胜利/测距/指向器走策略）
+  src/the_curved_world/obstacles.py     （nearest_realization + 散布安全边距策略）
+  src/the_curved_world/server.py        （chart_copies 下发、可见性走策略）
+  src/the_curved_world/maps/__init__.py （placement 支持 distance_mode）
+  src/the_curved_world/maps/builtin.py  （4 条注册项）
+  web/app.js                            （chartCopies 数据驱动）
+  tests/test_map_registry.py、tests/test_server.py、tests/test_obstacle_scale.py
+  README.md、docs/architecture.md、docs/contributing_extensions.md、DEMO_LINK.md
+新增：
+  tests/test_knotted_torus.py、tests/test_bottle_klein.py、
+  tests/test_elliptic_curve.py、tests/test_projective_plane.py
+  ai-logs/task18_report1.txt（本文件）
+
+八、复现命令
+--------------------------------------------------------------------------------
+  .\.venv\Scripts\python.exe -m pytest
+  .\.venv\Scripts\python.exe -m src.main --play  --map knot_garden --seed 12345
+  .\.venv\Scripts\python.exe -m src.main --play  --map klein_bottle_traditional --seed 12345
+  .\.venv\Scripts\python.exe -m src.main --serve --map elliptic_curve --debug
+  .\.venv\Scripts\python.exe -m src.main --serve --map projective_plane --debug

@@ -22,7 +22,17 @@ from src.the_curved_world.maps import (
 )
 from src.the_curved_world.world import WorldGenerator
 
-BUILTIN_IDS = ["double_torus", "ellipsoid_genus0", "planar_landscape", "torus_genus1"]
+BUILTIN_IDS = [
+    "double_torus",
+    "ellipsoid_genus0",
+    "elliptic_curve",
+    "klein_bottle",
+    "klein_bottle_traditional",
+    "knot_garden",
+    "planar_landscape",
+    "projective_plane",
+    "torus_genus1",
+]
 
 
 def test_builtin_maps_are_registered() -> None:
@@ -47,7 +57,7 @@ def test_create_builds_a_surface_per_id() -> None:
         assert hasattr(surface, "position") and hasattr(surface, "domain")
         assert surface.domain == world_config_for(map_id).domain
         seen.add(type(surface).__name__)
-    assert len(seen) == 4  # four distinct surface classes
+    assert len(seen) == 9  # nine distinct surface classes
 
 
 def test_unknown_map_id_is_rejected() -> None:
@@ -66,9 +76,15 @@ def test_every_map_builds_a_playable_world() -> None:
         world = WorldGenerator(config).generate(11)
         game = ExplorationGame(world)
         assert 0.0 <= game.read_detector().signal <= 1.0
+        blocked = 0
         for _ in range(30):
-            game.move(1.0, 0.3)
-        assert game.steps == 30
+            result = game.move(1.0, 0.3)
+            if not result.moved:
+                # the only legitimate reason to stop is a solid obstacle
+                assert result.collided, map_id
+                blocked += 1
+        assert game.steps + blocked == 30, map_id
+        assert game.steps > 0, map_id
 
 
 def test_map_id_round_trips() -> None:

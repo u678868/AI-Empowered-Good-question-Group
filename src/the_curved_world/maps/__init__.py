@@ -49,6 +49,9 @@ class MapMetadata:
     topology: str
     factory: Callable[[Dict[str, Any]], Any]
     placement: Dict[str, float] = field(default_factory=dict)
+    #: True for a non-orientable world (the Klein bottle): it has no global
+    #: "outside" and cannot be embedded in R^3 without self-intersection.
+    non_orientable: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """JSON-safe view (the callable factory is deliberately omitted)."""
@@ -58,6 +61,7 @@ class MapMetadata:
             "description": self.description,
             "topology": self.topology,
             "periodic": self.topology == CLOSED_PERIODIC,
+            "non_orientable": bool(self.non_orientable),
             "placement": dict(self.placement),
         }
 
@@ -115,6 +119,7 @@ def register_map(
     description: str,
     topology: str,
     placement: Optional[Dict[str, float]] = None,
+    non_orientable: bool = False,
 ):
     """Class/function decorator that registers a map factory.
 
@@ -132,6 +137,7 @@ def register_map(
                 topology=topology,
                 factory=factory,
                 placement=dict(placement or {}),
+                non_orientable=bool(non_orientable),
             )
         )
         return target
@@ -175,6 +181,7 @@ def world_config_for(map_id: str = DEFAULT_MAP_ID) -> WorldConfig:
         obstacle_count=int(placement.get("obstacle_count", 12)),
         obstacle_radius=float(placement.get("obstacle_radius", 1.2)),
         obstacle_safe_margin=float(placement.get("obstacle_safe_margin", 6.0)),
+        distance_mode=str(placement.get("distance_mode", "euclidean")),
     )
 
 

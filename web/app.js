@@ -92,14 +92,74 @@ function wrapParameter(value) {
   return ((value + Math.PI) % TWO_PI + TWO_PI) % TWO_PI - Math.PI;
 }
 
-function lerpAngle(a, b, t) {
-  return a + wrapParameter(b - a) * t;
+// The kernel publishes how its chart identifies points. Plain periodic maps
+// (torus, ellipsoid, two-hole look) use (2*pi, 2*pi); the Klein bottle uses
+// (4*pi, 2*pi), because a 2*pi shift in u mirrors v there instead of being the
+// identity. Wrapping by these periods is always invisible on the surface.
+function chartPeriods() {
+  const periods = state.player && state.player.chart_periods;
+  return Array.isArray(periods) && periods.length === 2 ? periods : [TWO_PI, TWO_PI];
 }
 
-// Nearest representative of ``a - b``: wrapped on a closed periodic map,
-// linear on a bounded map (so the domain edge never wraps around).
-function relativeDelta(a, b) {
-  return state.player && state.player.periodic ? wrapParameter(a - b) : (a - b);
+function isTwistedChart() {
+  return !!(state.player && state.player.twisted);
+}
+
+function wrapToPeriod(value, period) {
+  return ((value + period / 2) % period + period) % period - period / 2;
+}
+
+// Affine chart copies, published by the kernel as [du, dv, flip_v] triples.
+// One copy for the plain periodic charts; a Klein bottle has two sheets and the
+// antipodal projective plane four. Fallbacks keep an older payload working.
+function chartCopyTransforms() {
+  const published = state.player && state.player.chart_copies;
+  if (Array.isArray(published) && published.length) return published;
+  return isTwistedChart() ? [[0, 0, false], [TWO_PI, 0, true]] : [[0, 0, false]];
+}
+
+// Every chart copy of one surface point: (u + du, +-v + dv). On a Klein bottle
+// both sheets are the same 3D point; on the projective plane two of them are the
+// antipode -- the same *place*, on the far side of the covering sphere.
+function chartCopies(u, v) {
+  return chartCopyTransforms().map((entry) => {
+    const du = Number(entry[0]) || 0;
+    const dv = Number(entry[1]) || 0;
+    const flip = Boolean(entry[2]);
+    return [u + du, (flip ? -v : v) + dv];
+  });
+}
+
+// Chart displacement from a reference point to a world position, choosing the
+// copy that is actually nearest. Without this, features would jump to the far
+// side of the map when the player crosses a seam.
+function chartDelta(u, v, refU, refV) {
+  if (!(state.player && state.player.periodic)) return [u - refU, v - refV];
+  const [periodU, periodV] = chartPeriods();
+  let best = [0, 0];
+  let bestScore = Infinity;
+  for (const [copyU, copyV] of chartCopies(u, v)) {
+    const deltaU = wrapToPeriod(copyU - refU, periodU);
+    const deltaV = wrapToPeriod(copyV - refV, periodV);
+    const score = deltaU * deltaU + deltaV * deltaV;
+    if (score < bestScore) {
+      bestScore = score;
+      best = [deltaU, deltaV];
+    }
+  }
+  return best;
+}
+
+// Single-coordinate relative delta. Used for the player's own history and the
+// decorative parameter grid, which never change chart sheet.
+function relativeDelta(a, b, axis) {
+  if (!(state.player && state.player.periodic)) return a - b;
+  const periods = chartPeriods();
+  return wrapToPeriod(a - b, axis === 'v' ? periods[1] : periods[0]);
+}
+
+function lerpAngle(a, b, t) {
+  return a + wrapParameter(b - a) * t;
 }
 
 function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
@@ -231,15 +291,14 @@ function metricAt(patch, u, v) {
 }
 
 // Bring an absolute parameter point into the linear frame of the patch, which
-// may straddle the periodic seam.
+// may straddle the periodic seam (and, on a twisted chart, the flip).
 function localize(patch, u, v) {
   const [i, j] = centerIndex(patch);
   const cu = patch.x[i];
   const cv = patch.y[j];
-  if (state.player && state.player.periodic) {
-    return [cu + wrapParameter(u - cu), cv + wrapParameter(v - cv)];
-  }
-  return [u, v];
+  if (!(state.player && state.player.periodic)) return [u, v];
+  const [du, dv] = chartDelta(u, v, cu, cv);
+  return [cu + du, cv + dv];
 }
 
 // Bilinear height sample from the server's local patch (global z coordinate).
@@ -386,12 +445,12 @@ function resolveHardCollisions(fromUv, targetUv) {
   const p = state.player;
   if (!p || !p.patch) return { uv: targetUv.slice(), hit: false };
   const geometry = collisionGeometry(p.patch);
-  let offset = [relativeDelta(targetUv[0], fromUv[0]), relativeDelta(targetUv[1], fromUv[1])];
+  let offset = chartDelta(targetUv[0], targetUv[1], fromUv[0], fromUv[1]);
   let hit = false;
   for (let iteration = 0; iteration < 4; iteration += 1) {
     let adjusted = false;
     for (const obstacle of p.obstacles || []) {
-      const centre = [relativeDelta(obstacle.u, fromUv[0]), relativeDelta(obstacle.v, fromUv[1])];
+      const centre = chartDelta(obstacle.u, obstacle.v, fromUv[0], fromUv[1]);
       const reach = geometry.reachParam(obstacle);
       let dx = offset[0] - centre[0];
       let dy = offset[1] - centre[1];
@@ -412,8 +471,9 @@ function resolveHardCollisions(fromUv, targetUv) {
   let u = fromUv[0] + offset[0];
   let v = fromUv[1] + offset[1];
   if (p.periodic) {
-    u = wrapParameter(u);
-    v = wrapParameter(v);
+    const [periodU, periodV] = chartPeriods();
+    u = wrapToPeriod(u, periodU);
+    v = wrapToPeriod(v, periodV);
   } else if (p.domain) {
     u = clamp(u, p.domain.x_min, p.domain.x_max);
     v = clamp(v, p.domain.y_min, p.domain.y_max);
@@ -529,10 +589,10 @@ function drawTopDownWorld() {
   const viewRadius = Math.max(1e-6, patch.radius || 1);
   const scale = R / viewRadius;
   const geometry = collisionGeometry(patch);
-  const project = (u, v) => [
-    cx + relativeDelta(u, phys[0]) * scale,
-    cy - relativeDelta(v, phys[1]) * scale,
-  ];
+  const project = (u, v) => {
+    const [du, dv] = chartDelta(u, v, phys[0], phys[1]);
+    return [cx + du * scale, cy - dv * scale];
+  };
 
   if (!state.terrainCache || state.terrainCache.patch !== patch) {
     state.terrainCache = { patch, data: buildTerrain(patch) };
@@ -591,7 +651,7 @@ function drawTopDownWorld() {
   for (let k = Math.ceil(uMin / gridStep); k <= Math.floor(uMax / gridStep); k += 1) {
     const u = k * gridStep;
     if (!p.periodic && p.domain && (u < p.domain.x_min || u > p.domain.x_max)) continue;
-    const x = cx + relativeDelta(u, phys[0]) * scale;
+    const x = cx + relativeDelta(u, phys[0], 'u') * scale;
     ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
   }
   const vMin = phys[1] - viewRadius - gridStep;
@@ -599,7 +659,7 @@ function drawTopDownWorld() {
   for (let k = Math.ceil(vMin / gridStep); k <= Math.floor(vMax / gridStep); k += 1) {
     const v = k * gridStep;
     if (!p.periodic && p.domain && (v < p.domain.y_min || v > p.domain.y_max)) continue;
-    const y = cy - relativeDelta(v, phys[1]) * scale;
+    const y = cy - relativeDelta(v, phys[1], 'v') * scale;
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
   }
 
@@ -612,8 +672,8 @@ function drawTopDownWorld() {
     let previous = null;
     let previousVisible = false;
     for (const point of points) {
-      const sx = cx + relativeDelta(point[0], phys[0]) * scale;
-      const sy = cy - relativeDelta(point[1], phys[1]) * scale;
+      const sx = cx + relativeDelta(point[0], phys[0], 'u') * scale;
+      const sy = cy - relativeDelta(point[1], phys[1], 'v') * scale;
       const visible = Math.hypot(sx - cx, sy - cy) <= R * 0.98;
       if (visible && previousVisible && Math.hypot(sx - previous[0], sy - previous[1]) < R * 0.6) {
         ctx.beginPath();
@@ -808,9 +868,10 @@ function drawGauge() {
 
 function drawGodView() {
   const canvas = el('god-canvas');
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width;
-  const H = canvas.height;
+  // Size the backing store to the panel and draw in CSS pixels (like the main
+  // map canvas). Previously this used the fixed 760x520 attribute size, which
+  // the browser then stretched to the panel width -- a visibly blurry mesh.
+  const { ctx, W, H } = frameCanvas(canvas);
   ctx.fillStyle = '#06080d';
   ctx.fillRect(0, 0, W, H);
 
@@ -845,6 +906,10 @@ function drawGodView() {
   const sinY = Math.sin(state.yaw);
   const cosP = Math.cos(state.pitch);
   const sinP = Math.sin(state.pitch);
+  // Fill factor: coordinates are normalised so that unit = 1 / largest span, so
+  // |X|, |Y| <= 0.5 and |rx| <= 0.5 * (|cos| + |sin|) <= 0.707 for any yaw.
+  // 0.68 therefore uses ~68% of the canvas without ever clipping the surface.
+  const FILL = 0.68;
 
   const project = (x, y, z) => {
     const X = (x - centreX) * unit;
@@ -852,7 +917,7 @@ function drawGodView() {
     const Z = (z - centreZ) * unit;
     const rx = X * cosY - Y * sinY;
     const ry = X * sinY + Y * cosY;
-    return [W / 2 + rx * W * 0.42, H / 2 + (ry * sinP - Z * cosP) * H * 0.42];
+    return [W / 2 + rx * W * FILL, H / 2 + (ry * sinP - Z * cosP) * H * FILL];
   };
 
   const nodes = new Array(nx * ny);
@@ -864,8 +929,8 @@ function drawGodView() {
       const rx = X * cosY - Y * sinY;
       const ry = X * sinY + Y * cosY;
       nodes[j * nx + i] = [
-        W / 2 + rx * W * 0.42,
-        H / 2 + (ry * sinP - Z * cosP) * H * 0.42,
+        W / 2 + rx * W * FILL,
+        H / 2 + (ry * sinP - Z * cosP) * H * FILL,
         ry * cosP + Z * sinP,
       ];
     }
@@ -996,6 +1061,7 @@ function formatDuration(seconds) {
 function topologyLabel(mapId) {
   const entry = state.maps.find((item) => item.id === mapId);
   if (!entry) return '-';
+  if (entry.non_orientable) return 'closed periodic, non-orientable (immersed, self-intersecting)';
   if (entry.topology === 'closed_periodic') return 'closed periodic manifold';
   if (entry.topology === 'bounded_plane') return 'bounded plane';
   return entry.topology;
@@ -1364,7 +1430,10 @@ async function runTool(tool) {
 
 async function setGodView(visible) {
   if (Boolean(visible) === Boolean(state.godVisible)) {
-    if (state.godVisible) drawGodView();
+    // Already in the requested state -- but re-read the privileged state anyway.
+    // The lobby can rebuild the world underneath us, and redrawing the cached
+    // payload would silently leave the *previous* map's mesh on screen.
+    if (state.godVisible) await refreshGodView();
     return;
   }
   await toggleGodView();
@@ -1374,6 +1443,17 @@ async function toggleGodView() {
   state.godVisible = !state.godVisible;
   el('god-panel').classList.toggle('hidden', !state.godVisible);
   el('mode').textContent = state.godVisible ? 'god view (debug)' : 'top-down map';
+  if (!state.godVisible) return;
+  // The privileged panel sits below the local map, so bring it into view --
+  // otherwise the 3D mesh is drawn but stays off-screen. Scrolling is instant
+  // on purpose: the view must be there the moment the toggle is pressed.
+  el('god-panel').scrollIntoView({ behavior: 'auto', block: 'start' });
+  await refreshGodView();
+}
+
+// Fetch the privileged state and redraw. This is deliberately always a fresh
+// request: the god view must never show a mesh that belongs to another world.
+async function refreshGodView() {
   if (!state.godVisible) return;
   try {
     state.debugState = await apiGet('/api/state/debug');
@@ -1443,6 +1523,9 @@ async function enterWorld() {
     PHYS.dirty = false;
     PHYS.hitFlash = 0;
     hideCard();
+    // Drop the privileged cache with the old world so nothing stale can be
+    // redrawn; setGodView() below re-reads it for the new session.
+    state.debugState = null;
     await refreshState();
     hideLobby();
     await setGodView(mode === 'god');

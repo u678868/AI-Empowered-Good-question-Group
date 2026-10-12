@@ -220,7 +220,17 @@ def test_http_maps_endpoint_lists_the_registry() -> None:
         with urllib.request.urlopen(_url(httpd, "/api/maps"), timeout=10) as response:
             payload = json.loads(response.read().decode("utf-8"))
         ids = [entry["id"] for entry in payload["maps"]]
-        assert ids == ["double_torus", "ellipsoid_genus0", "planar_landscape", "torus_genus1"]
+        assert ids == [
+            "double_torus",
+            "ellipsoid_genus0",
+            "elliptic_curve",
+            "klein_bottle",
+            "klein_bottle_traditional",
+            "knot_garden",
+            "planar_landscape",
+            "projective_plane",
+            "torus_genus1",
+        ]
         assert payload["default"] == "torus_genus1"
         for entry in payload["maps"]:
             assert entry["name"] and entry["description"]
