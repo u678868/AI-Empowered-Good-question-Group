@@ -11,9 +11,13 @@ from src.the_curved_world.manifold import wrap_parameter
 from src.the_curved_world.maps import MapRegistry, world_config_for
 from src.the_curved_world.quest import (
     GaussBonnetQuest,
+    HolonomyMeasurement,
+    HomotopyMeasurement,
+    ParabolicMeasurement,
     GeometricQuest,
     QuestManager,
     QuestResult,
+    RingMeasurement,
     TriangleMeasurement,
 )
 from src.the_curved_world.scanner import clear_scan_cache, scan_manifold
@@ -79,7 +83,7 @@ def test_adaptive_target_stays_inside_the_physical_window() -> None:
 
 def test_quest_manager_completes_and_awards_the_relic() -> None:
     features = scan_manifold(world_config_for("torus_genus1").surface, genus_hint=1)
-    manager = QuestManager(features, seed=12345)
+    manager = QuestManager(features, seed=12345, quests=[GaussBonnetQuest()])
     assert manager.exit_sealed is True
     assert manager.active_quest is not None
     assert manager.active_quest.id == "gauss_bonnet_excess"
@@ -143,9 +147,56 @@ def test_exit_seal_blocks_victory_until_the_quest_is_complete() -> None:
     assert response["quest_completed"] is True
     assert response["proof"]["relic"] == "Curvature Seal"
     assert len(response["proof"]["steps"]) >= 4
-    assert response["quest"]["exit_sealed"] is False
-    assert response["quest"]["relics"] == ["Curvature Seal"]
-    # the player was standing on the exit when the seal opened
+    # Task 20: the chain now holds a second quest (BDP), so the seal stays closed
+    assert "Curvature Seal" in response["quest"]["relics"]
+    assert response["quest"]["exit_sealed"] is True
+    assert session.game.won is False
+
+    # Finish the remaining quests at the engine level, then re-check the exit.
+    while manager.active_quest is not None:
+        active = manager.active_quest
+        if active.id == "bdp_circle_deficit":
+            radius = features.bdp_reference_radius_world
+            manager.evaluate_ring_measurement(
+                RingMeasurement(
+                    center_label="O",
+                    vertex_labels=tuple(f"P{index}" for index in range(12)),
+                    perimeter=0.9 * 2.0 * math.pi * radius,
+                    mean_radius=radius,
+                )
+            )
+        elif active.id == "holonomy_loop":
+            manager.evaluate_holonomy_measurement(
+                HolonomyMeasurement(
+                    start_label="A",
+                    vertex_labels=("A", "B", "C"),
+                    angle=features.holonomy_target_angle + 0.01,
+                )
+            )
+        elif active.id == "parabolic_line":
+            manager.evaluate_parabolic_measurement(
+                ParabolicMeasurement(
+                    labels=("P1", "P2", "P3"),
+                    curvatures=(0.0, 0.0, 0.0),
+                    pairwise_distances=(features.parabolic_min_distance,) * 3,
+                )
+            )
+        elif active.id == "homotopy_loop":
+            manager.evaluate_homotopy_measurement(
+                HomotopyMeasurement(
+                    origin_label="O",
+                    phase_u=2.0 * math.pi,
+                    phase_v=0.0,
+                    closure_distance=0.0,
+                    capture_radius=features.homotopy_capture_radius,
+                )
+            )
+        else:
+            manager.evaluate_measurement(
+                TriangleMeasurement(angle_sum=features.reference_angle_sum, markers=("A", "B", "C"))
+            )
+    assert manager.exit_unlocked is True
+    session.game.sync_position(float(world.exit[0]), float(world.exit[1]))
     assert session.game.won is True
 
 
@@ -164,6 +215,12 @@ def test_quest_payload_never_leaks_hidden_state() -> None:
         "genus",
         "closed",
         "has_positive_peak",
+        "bdp_ratio_target",
+        "has_holonomy_flux",
+        "holonomy_target_angle_degrees",
+        "parabolic_tolerance",
+        "parabolic_min_distance",
+        "homotopy_capture_radius",
     }
     # no raw parameter peak / coordinate hatch is shipped to the player
     assert "peak" not in features

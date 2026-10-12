@@ -11,6 +11,13 @@ import pytest
 
 from src.the_curved_world.gameplay import GameError
 from src.the_curved_world.manifold import wrap_parameter
+from src.the_curved_world.quest import (
+    HolonomyMeasurement,
+    HomotopyMeasurement,
+    ParabolicMeasurement,
+    RingMeasurement,
+    TriangleMeasurement,
+)
 from src.the_curved_world.ropes import RopeError, RopeNode, RopeSystem
 from src.the_curved_world.server import GameSession
 
@@ -132,7 +139,7 @@ def test_rope_rejects_unknown_invisible_or_self_endpoints() -> None:
         })
 
 
-def test_overlong_marker_pair_is_rejected_on_the_server() -> None:
+def test_large_marker_pair_is_allowed_with_generous_default_limits() -> None:
     session = GameSession(seed=12345, map_id="torus_genus1", mode="player")
     surface = session.game.player_view.surface
     start = session.game.position
@@ -148,12 +155,13 @@ def test_overlong_marker_pair_is_rejected_on_the_server() -> None:
     for name, point in (("A", start), ("B", far)):
         session.game.sync_position(*point)
         session.tool({"tool": "mark", "name": name})
-    with pytest.raises(GameError):
-        session.tool({
-            "tool": "rope_connect",
-            "from_type": "marker", "from_id": "A",
-            "to_type": "marker", "to_id": "B",
-        })
+    connected = session.tool({
+        "tool": "rope_connect",
+        "from_type": "marker", "from_id": "A",
+        "to_type": "marker", "to_id": "B",
+    })
+    assert connected["rope"]["length_3d"] > 120.0
+    assert connected["rope_remaining"] < connected["rope_total"]
 
 
 def test_protractor_rope_triangle_measures_and_reports_quest_progress() -> None:
@@ -189,7 +197,10 @@ def test_protractor_marker_triangle_completes_quest_one() -> None:
     assert result["kind"] == "triangle_angle_sum"
     assert result["quest_completed"] is True
     assert result["proof"]["relic"] == "Curvature Seal"
-    assert result["quest"]["exit_sealed"] is False
+    assert "Curvature Seal" in result["quest"]["relics"]
+    assert "gauss_bonnet_excess" in result["quest"]["completed_quests"]
+    # Task 20: the exit seal only opens after every required quest
+    assert result["quest"]["exit_sealed"] == (result["quest"]["required_remaining"] > 0)
 
 
 def test_detector_is_sealed_until_the_quest_is_complete() -> None:
@@ -204,11 +215,44 @@ def test_detector_is_sealed_until_the_quest_is_complete() -> None:
     assert scan["signal"] == 0.0
     assert scan["label"] == "Sealed"
 
-    features = session.game.quest_manager.features
+    manager = session.game.quest_manager
+    features = manager.features
     for name, (u, v) in zip(("A", "B", "C"), _reference_markers(features)):
         session.game.sync_position(u, v)
         session.tool({"tool": "mark", "name": name})
     session.tool({"tool": "measure", "mode": "protractor", "targets": ["A", "B", "C"]})
+
+    while manager.active_quest is not None:
+        active = manager.active_quest
+        if active.id == "bdp_circle_deficit":
+            radius = features.bdp_reference_radius_world
+            manager.evaluate_ring_measurement(
+                RingMeasurement(
+                    center_label="O",
+                    vertex_labels=tuple(f"P{index}" for index in range(12)),
+                    perimeter=0.9 * 2.0 * math.pi * radius,
+                    mean_radius=radius,
+                )
+            )
+        elif active.id == "holonomy_loop":
+            manager.evaluate_holonomy_measurement(HolonomyMeasurement(
+                start_label="A", vertex_labels=("A", "B", "C"),
+                angle=features.holonomy_target_angle + 0.01,
+            ))
+        elif active.id == "parabolic_line":
+            manager.evaluate_parabolic_measurement(ParabolicMeasurement(
+                labels=("P1", "P2", "P3"), curvatures=(0.0, 0.0, 0.0),
+                pairwise_distances=(features.parabolic_min_distance,) * 3,
+            ))
+        elif active.id == "homotopy_loop":
+            manager.evaluate_homotopy_measurement(HomotopyMeasurement(
+                origin_label="O", phase_u=2.0 * math.pi, phase_v=0.0,
+                closure_distance=0.0, capture_radius=features.homotopy_capture_radius,
+            ))
+        else:
+            manager.evaluate_measurement(
+                TriangleMeasurement(angle_sum=features.reference_angle_sum, markers=("A", "B", "C"))
+            )
 
     after = session.player_state()
     assert after["detector_locked"] is False
@@ -278,9 +322,9 @@ def test_angle_mode_returns_one_vertex_and_angle_sum_needs_three() -> None:
     assert summed["angle_sum_degrees"] == pytest.approx(180.0, abs=15.0)
     assert "quest" in summed
 
-def test_default_rope_limits_fit_the_large_maps() -> None:
+def test_default_rope_limits_are_effectively_unlimited() -> None:
     session = GameSession(seed=12345, map_id="torus_genus1", mode="player")
     state = session.player_state()
-    assert state["rope_max_segment"] == pytest.approx(100.0)
-    assert state["rope_total"] == pytest.approx(300.0)
-    assert state["rope_remaining"] == pytest.approx(300.0)
+    assert state["rope_max_segment"] == pytest.approx(1_000_000.0)
+    assert state["rope_total"] == pytest.approx(1_000_000.0)
+    assert state["rope_remaining"] == pytest.approx(1_000_000.0)

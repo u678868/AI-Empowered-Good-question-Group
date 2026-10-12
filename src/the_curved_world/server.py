@@ -26,9 +26,11 @@ from src.the_curved_world.config import ConfigError, WorldConfig, default_config
 from src.the_curved_world.maps import DEFAULT_MAP_ID, MapNotFound, MapRegistry, map_id_for, world_config_for
 from src.the_curved_world.gameplay import ExplorationGame, GameError, GameplayConfig
 from src.the_curved_world.observations import ObservationConfig
-from src.the_curved_world.quest import QuestManager
+from src.the_curved_world.quest import HolonomyMeasurement, ParabolicMeasurement, QuestManager, RingMeasurement
 from src.the_curved_world.ropes import RopeNode
-from src.the_curved_world.scanner import scan_manifold
+from src.the_curved_world.differential import parallel_transport_polyline, principal_curvatures
+from src.the_curved_world.manifold import wrap_parameter
+from src.the_curved_world.scanner import metric_length, scan_manifold
 from src.the_curved_world.world import WorldGenerator
 
 WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
@@ -107,6 +109,12 @@ class GameSession:
             self.map_id = map_id or map_id_for(world_config)
         self.mode = mode if mode in ("player", "god") else ("god" if debug else "player")
         self.debug = self.startup_debug
+        try:
+            metadata = MapRegistry.get(self.map_id)
+            self.capabilities = metadata.capabilities.to_dict()
+        except MapNotFound:
+            from src.the_curved_world.maps.map_capabilities import MapCapabilities
+            self.capabilities = MapCapabilities().to_dict()
         self.scale_factor = _validated_scale(scale_factor)
         self.difficulty = _normalized_difficulty(difficulty)
         self._last_collided = False
@@ -146,6 +154,11 @@ class GameSession:
             self.map_id = str(map_id)
             self.world_config = world_config_for(self.map_id)
             self._generator = WorldGenerator(self.world_config)
+            try:
+                self.capabilities = MapRegistry.get(self.map_id).capabilities.to_dict()
+            except MapNotFound:
+                from src.the_curved_world.maps.map_capabilities import MapCapabilities
+                self.capabilities = MapCapabilities().to_dict()
         if mode in ("player", "god"):
             self.mode = mode
         self.reset(seed)
@@ -160,6 +173,7 @@ class GameSession:
             "periodic": bool(getattr(self._game.player_view.surface, "periodic", False)),
             "scale_factor": _round(self.scale_factor),
             "difficulty": self.difficulty,
+            "capabilities": dict(self.capabilities),
             **self._chart_payload(),
         }
 
@@ -179,6 +193,9 @@ class GameSession:
             genus_hint = None
         features = scan_manifold(world.surface, samples=31, genus_hint=genus_hint)
         quest_manager = QuestManager(features, seed=int(world.seed))
+        self._holonomy_start_label = None
+        self._holonomy_vector = (1.0, 0.0)
+        self._holonomy_calibrated = False
         return ExplorationGame(
             world,
             gameplay_config,
@@ -206,18 +223,7 @@ class GameSession:
         }
 
     def _chart_payload(self) -> Dict[str, Any]:
-        """How the chart identifies its own points (periods and sheets).
-
-        The front-end must wrap parameter deltas exactly the way the kernel
-        does. That is ``2 pi`` per axis for the torus-like charts, but the Klein
-        bottle needs ``4 pi`` in ``u`` because a ``2 pi`` shift there mirrors
-        ``v`` -- and it carries two chart copies of every surface point. The
-        projective plane carries four. ``chart_copies`` publishes those sheets as
-        ``[du, dv, flip_v]`` triples so the browser never has to guess.
-
-        This payload stays purely geometric: it says nothing about the hidden
-        exit.
-        """
+        """Player-visible chart periods and sheet transforms for periodic maps."""
         surface = self._game.player_view.surface
         periods = getattr(surface, "chart_periods", None)
         period_u, period_v = periods() if callable(periods) else (2.0 * math.pi, 2.0 * math.pi)
@@ -229,6 +235,10 @@ class GameSession:
             "chart_periods": [_round(period_u), _round(period_v)],
             "chart_copies": [[_round(du), _round(dv), bool(flip)] for du, dv, flip in copies],
         }
+
+    def _require_capability(self, name: str) -> None:
+        if not bool(self.capabilities.get(str(name), False)):
+            raise GameError(f"the current map does not support {name}")
 
     def _observation_payload(self) -> Dict[str, Any]:
         if self.difficulty in ("medium", "hard"):
@@ -259,6 +269,182 @@ class GameSession:
             "effective_steps": _round(self._game.effective_steps),
             "tool_usages": {key: int(value) for key, value in self._game.tool_usages.items()},
         }
+
+    def _holonomy_payload(self) -> Dict[str, Any]:
+        """Player-safe calibration and loop state for Quest 3."""
+        manager = self._game.quest_manager
+        quest = manager.active_quest if manager is not None else None
+        if quest is None or quest.id != "holonomy_loop":
+            return {}
+        return {
+            "calibrated": bool(self._holonomy_calibrated),
+            "start_label": self._holonomy_start_label,
+            "vector": [float(self._holonomy_vector[0]), float(self._holonomy_vector[1])],
+        }
+
+    @staticmethod
+    def _short_metric_length(surface, first, second) -> float:
+        """Metric length using the shortest periodic parameter representative."""
+        first_uv = (float(first[0]), float(first[1]))
+        second_uv = (float(second[0]), float(second[1]))
+        du = second_uv[0] - first_uv[0]
+        dv = second_uv[1] - first_uv[1]
+        if bool(getattr(surface, "periodic", False)):
+            du = wrap_parameter(du)
+            dv = wrap_parameter(dv)
+        return float(metric_length(surface, first_uv, (first_uv[0] + du, first_uv[1] + dv)))
+
+    def _marker_uv(self, name: str):
+        marker = next((item for item in self._game.markers if item.name == str(name)), None)
+        if marker is None:
+            raise GameError(f"unknown marker {name!r}")
+        return marker
+
+    def _measure_holonomy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        game = self._game
+        manager = game.quest_manager
+        quest = manager.active_quest if manager is not None else None
+        if quest is None or quest.id != "holonomy_loop":
+            raise GameError("holonomy measurement requires the active holonomy quest")
+        targets = payload.get("targets")
+        if not isinstance(targets, (list, tuple)) or not targets:
+            raise GameError("holonomy measurement needs marker names or one closed rope loop")
+        points = []
+        labels = []
+        first = targets[0]
+        if isinstance(first, dict) and str(first.get("type", "")).lower() == "rope":
+            if len(targets) != 1:
+                raise GameError("holonomy with ropes expects one rope id")
+            rope = game.rope_system.get(int(first.get("id")))
+            loop = game.rope_system.closed_loop_containing(rope.id)
+            if loop is None:
+                raise GameError("the selected rope is not part of a closed loop")
+            nodes, _ropes = loop
+            for node in nodes:
+                labels.append(str(node.label))
+                points.append((float(node.uv[0]), float(node.uv[1])))
+        else:
+            for item in targets:
+                if isinstance(item, dict):
+                    name = str(item.get("id"))
+                else:
+                    name = str(item)
+                marker = self._marker_uv(name)
+                labels.append(marker.name)
+                points.append((float(marker.position[0]), float(marker.position[1])))
+        if len(points) < 3:
+            raise GameError("holonomy loop needs at least three path points")
+        start_label = str(payload.get("start") or (labels[0] if labels else ""))
+        if self._holonomy_calibrated and self._holonomy_start_label == start_label:
+            vector = self._holonomy_vector
+        else:
+            # The UI asks for an explicit calibration; this fallback keeps the
+            # mathematical API usable for scripted tests without leaking any
+            # hidden world state.
+            vector = (1.0, 0.0)
+        surface = game.player_view.surface
+        transport = parallel_transport_polyline(
+            surface,
+            points,
+            vector,
+            samples_per_segment=32,
+        )
+        # Marker lists and rope cycles are treated as closed polygons: the
+        # transport helper explicitly joins the last point back to the first.
+        # A repeated first marker is also accepted, but it must not be required
+        # from the player before the system can recognise the loop.
+        closure_error = 0.0
+        if len(points) > 1:
+            same_first = (
+                abs(float(points[0][0]) - float(points[-1][0])) < 1e-9
+                and abs(float(points[0][1]) - float(points[-1][1])) < 1e-9
+            )
+            if not same_first and labels and labels[0] == labels[-1]:
+                closure_error = 0.0
+        measurement = HolonomyMeasurement(
+            start_label=start_label,
+            vertex_labels=tuple(labels),
+            angle=float(transport["angle"]),
+            closure_error=closure_error,
+            vector_start=tuple(float(value) for value in transport["vector_start"]),
+            vector_end=tuple(float(value) for value in transport["vector_end"]),
+            steps=int(transport["steps"]),
+        )
+        completion = game.evaluate_holonomy_measurement(measurement)
+        out = {
+            "ok": True,
+            "tool": "measure",
+            "mode": "holonomy",
+            "kind": "levi_civita_holonomy",
+            "start": start_label,
+            "vertices": labels,
+            "angle_degrees": _round(math.degrees(measurement.angle), 6),
+            "abs_angle_degrees": _round(math.degrees(abs(measurement.angle)), 6),
+            "closure_error": _round(closure_error),
+            "vector_start": [_round(value, 8) for value in measurement.vector_start],
+            "vector_end": [_round(value, 8) for value in measurement.vector_end],
+            "integration_steps": measurement.steps,
+            "calibrated": bool(self._holonomy_calibrated and self._holonomy_start_label == start_label),
+            "quest": game.quest_state(),
+            "quest_completed": False,
+        }
+        if completion is not None:
+            out.update({
+                "quest": completion["quest"],
+                "proof": completion["proof"],
+                "quest_completed": True,
+            })
+        return out
+
+    def _measure_parabolic(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        game = self._game
+        manager = game.quest_manager
+        quest = manager.active_quest if manager is not None else None
+        if quest is None or quest.id != "parabolic_line":
+            raise GameError("parabolic measurement requires the active parabolic quest")
+        targets = payload.get("targets")
+        if not isinstance(targets, (list, tuple)) or len(targets) != 3:
+            raise GameError("parabolic validation needs exactly three marker names")
+        markers = []
+        for item in targets:
+            name = str(item.get("id")) if isinstance(item, dict) else str(item)
+            markers.append(self._marker_uv(name))
+        points = [(float(marker.position[0]), float(marker.position[1])) for marker in markers]
+        surface = game.player_view.surface
+        curvatures = tuple(float(surface.gaussian_curvature(*point)) for point in points)
+        principal = tuple(principal_curvatures(surface, *point) for point in points)
+        distances = []
+        for i in range(3):
+            for j in range(i + 1, 3):
+                distances.append(self._short_metric_length(surface, points[i], points[j]))
+        measurement = ParabolicMeasurement(
+            labels=tuple(marker.name for marker in markers),
+            curvatures=curvatures,
+            principal_curvatures=principal,
+            pairwise_distances=tuple(distances),
+        )
+        completion = game.evaluate_parabolic_measurement(measurement)
+        out = {
+            "ok": True,
+            "tool": "measure",
+            "mode": "parabolic",
+            "kind": "parabolic_line",
+            "labels": [marker.name for marker in markers],
+            "curvatures": [_round(value, 10) for value in curvatures],
+            "principal_curvatures": [[_round(a, 8), _round(b, 8)] for a, b in principal],
+            "pairwise_distances": [_round(value) for value in distances],
+            "tolerance": _round(float(manager.features.parabolic_tolerance), 10) if manager is not None else 0.0,
+            "min_distance": _round(float(manager.features.parabolic_min_distance)) if manager is not None else 0.0,
+            "quest": game.quest_state(),
+            "quest_completed": False,
+        }
+        if completion is not None:
+            out.update({
+                "quest": completion["quest"],
+                "proof": completion["proof"],
+                "quest_completed": True,
+            })
+        return out
 
     def _surface_patch(self, position) -> Dict[str, Any]:
         """Local patch centred on the player, plus its first fundamental form.
@@ -307,9 +493,8 @@ class GameSession:
         point = np.asarray(self._game.player_view.position(position), dtype=float)
         visible: List[Dict[str, Any]] = []
         for obstacle in field.obstacles:
-            # Measured with the world's own distance policy, so a quotient world
-            # (projective plane) treats an antipodal twin as the same place.
-            distance = field.nearest_realization(point, obstacle)[1]
+            delta = np.asarray(obstacle.position_3d, dtype=float) - point
+            distance = float(np.linalg.norm(delta))
             if distance > radius:
                 continue
             visible.append({**obstacle.to_dict(), "distance": _round(distance)})
@@ -330,6 +515,7 @@ class GameSession:
             "map_id": self.map_id,
             "mode": self.mode,
             "domain": self._domain_payload(),
+            "capabilities": dict(self.capabilities),
             **self._chart_payload(),
             "position": [_round(position[0]), _round(position[1])],
             "position3d": [_round(v) for v in position3d],
@@ -361,6 +547,8 @@ class GameSession:
             "won": bool(game.won),
             "detector_locked": bool(game.detector_locked),
             "quest": game.quest_state(),
+            "homotopy": game.homotopy_state(),
+            "holonomy": self._holonomy_payload(),
             **game.rope_state(),
             **self._scoring_payload(),
             **self._observation_payload(),
@@ -436,6 +624,9 @@ class GameSession:
             "yaw": _round(self._game.yaw, 6),
             "detector_locked": bool(self._game.detector_locked),
             "quest": self._game.quest_state(),
+            **self._chart_payload(),
+            "homotopy": self._game.homotopy_state(),
+            "holonomy": self._holonomy_payload(),
             **self._scoring_payload(),
             **self._observation_payload(),
         }
@@ -485,7 +676,6 @@ class GameSession:
             "quest": self._game.quest_state(),
             **self._game.rope_state(),
             **self._scoring_payload(),
-            **self._chart_payload(),
             **self._observation_payload(),
         }
     def step_action(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -514,12 +704,79 @@ class GameSession:
                 "yaw": _round(self._game.yaw, 6),
                 "position": [_round(self._game.position[0]), _round(self._game.position[1])],
                 "position3d": [_round(v) for v in position3d],
-                **self._chart_payload(),
                 **self._observation_payload(),
             }
 
         count = self._step_count(payload.get("steps", 1))
         return self._move_payload(self._game.move_relative(str(direction), count))
+    @staticmethod
+    def _best_center_marker(game: ExplorationGame, nodes):
+        """Pick the player marker closest to the ring centroid as the ring center (Task 20)."""
+        loop_keys = {(node.kind, str(node.id)) for node in nodes}
+        candidates = [marker for marker in game.markers if ("marker", marker.name) not in loop_keys]
+        if not candidates:
+            return None
+        centroid = [
+            sum(float(node.position_3d[index]) for node in nodes) / len(nodes) for index in range(3)
+        ]
+        best = None
+        for marker in candidates:
+            point = game.player_view.position(marker.position)
+            distance = math.sqrt(sum((float(point[i]) - centroid[i]) ** 2 for i in range(3)))
+            if best is None or distance < best[0]:
+                best = (distance, marker)
+        return None if best is None else best[1]
+
+    def _ring_measurement(self, center, nodes, ropes) -> tuple:
+        """Metric (geodesic-ish) ring measurement around a center peg (Task 20)."""
+        surface = self._game.player_view.surface
+        center_uv = (float(center.position[0]), float(center.position[1]))
+        samples = [
+            metric_length(surface, center_uv, (float(node.uv[0]), float(node.uv[1])))
+            for node in nodes
+        ]
+        perimeter = 0.0
+        for index, node in enumerate(nodes):
+            nxt = nodes[(index + 1) % len(nodes)]
+            perimeter += metric_length(
+                surface,
+                (float(node.uv[0]), float(node.uv[1])),
+                (float(nxt.uv[0]), float(nxt.uv[1])),
+            )
+        mean_radius = sum(samples) / len(samples) if samples else 0.0
+        rope_perimeter = sum(float(rope.length_3d) for rope in ropes)
+        measurement = RingMeasurement(
+            center_label=center.name,
+            vertex_labels=tuple(node.label for node in nodes),
+            perimeter=float(perimeter),
+            mean_radius=float(mean_radius),
+            radius_samples=tuple(float(value) for value in samples),
+        )
+        payload = {
+            "center": center.name,
+            "vertices": [node.label for node in nodes],
+            "vertex_count": len(nodes),
+            "perimeter": _round(perimeter),
+            "mean_radius": _round(mean_radius),
+            "radius_samples": [_round(value) for value in samples],
+            "rope_perimeter": _round(rope_perimeter),
+        }
+        return payload, measurement
+
+    @staticmethod
+    def _circumcircle_measurement(circle) -> RingMeasurement:
+        return RingMeasurement(
+            center_label=str(circle.center_label),
+            vertex_labels=tuple(str(label) for label in circle.labels),
+            perimeter=float(circle.perimeter),
+            mean_radius=float(circle.surface_radius),
+            flat_perimeter=float(circle.flat_perimeter),
+            center_curvature=float(circle.curvature),
+            center=(float(circle.center[0]), float(circle.center[1])),
+            triangle_labels=tuple(str(label) for label in circle.labels),
+            is_circumcircle=True,
+        )
+
     def _visible_obstacles_now(self) -> List[Dict[str, Any]]:
         position = self._game.position
         patch = self._surface_patch(position)
@@ -570,9 +827,35 @@ class GameSession:
         game = self._game
         if mode == "ruler":
             first = targets[0]
+            if isinstance(first, dict) and str(first.get("type", "")).lower() == "circumcircle":
+                circle = next(
+                    (item for item in game.rope_system.circumcircles if item.id == int(first.get("id"))),
+                    None,
+                )
+                if circle is None:
+                    raise GameError("unknown circumcircle id")
+                measurement = self._circumcircle_measurement(circle)
+                out: Dict[str, Any] = {
+                    "ok": True,
+                    "tool": "measure",
+                    "mode": "ruler",
+                    "kind": "circumcircle_perimeter",
+                    "circumcircle": circle.to_dict(),
+                    "distance": _round(circle.perimeter),
+                    "quest": game.quest_state(),
+                    "quest_completed": False,
+                }
+                completion = game.evaluate_ring_measurement(measurement)
+                if completion is not None:
+                    out.update({
+                        "quest": completion["quest"],
+                        "proof": completion["proof"],
+                        "quest_completed": True,
+                    })
+                return out
             if isinstance(first, dict) and str(first.get("type", "")).lower() == "rope":
                 rope = game.rope_system.get(int(first.get("id")))
-                return {
+                out: Dict[str, Any] = {
                     "ok": True,
                     "tool": "measure",
                     "mode": "ruler",
@@ -580,6 +863,22 @@ class GameSession:
                     "rope_id": rope.id,
                     "distance": _round(rope.length_3d),
                 }
+                loop = game.rope_system.closed_loop_containing(rope.id)
+                if loop is not None:
+                    nodes, loop_ropes = loop
+                    center = self._best_center_marker(game, nodes)
+                    if center is not None:
+                        payload, measurement = self._ring_measurement(center, nodes, loop_ropes)
+                        out["ring"] = payload
+                        completion = game.evaluate_ring_measurement(measurement)
+                        if completion is not None:
+                            out["quest_completed"] = True
+                            out["quest"] = completion["quest"]
+                            out["proof"] = completion["proof"]
+                        else:
+                            out["quest_completed"] = False
+                            out["quest"] = game.quest_state()
+                return out
             if len(targets) == 2:
                 obstacles = self._visible_obstacles_now()
                 nodes = [self._resolve_rope_node(item, obstacles) for item in targets]
@@ -811,6 +1110,7 @@ class GameSession:
                 "readings": len(game.log),
             }
         if tool == "mark":
+            self._require_capability("markers")
             marker = game.place_marker(str(payload.get("name", "")))
             return {
                 "ok": True,
@@ -821,7 +1121,56 @@ class GameSession:
                 "label": marker.label,
             }
         if tool == "measure":
+            self._require_capability("measurement")
             mode = str(payload.get("mode", "")).strip().lower()
+            if mode == "holonomy_calibrate":
+                targets = payload.get("targets", [])
+                if not isinstance(targets, (list, tuple)) or not targets:
+                    raise GameError("holonomy calibrate needs a marker")
+                first = targets[0]
+                name = str(first.get("id")) if isinstance(first, dict) else str(first)
+                calibrated = game.calibrate_tangent_vector(name)
+                self._holonomy_start_label = str(calibrated["marker"])
+                self._holonomy_vector = (float(calibrated["vector"][0]), float(calibrated["vector"][1]))
+                self._holonomy_calibrated = True
+                return {
+                    "ok": True,
+                    "tool": "measure",
+                    "mode": "holonomy_calibrate",
+                    "kind": "parallel_vector_calibrated",
+                    "calibrated": True,
+                    "marker": self._holonomy_start_label,
+                    "vector": [round(float(self._holonomy_vector[0]), 8), round(float(self._holonomy_vector[1]), 8)],
+                    "heading_radians": _round(calibrated["heading_radians"]),
+                    "quest": game.quest_state(),
+                    "holonomy": self._holonomy_payload(),
+                }
+            if mode == "holonomy":
+                return self._measure_holonomy(payload)
+            if mode == "parabolic":
+                return self._measure_parabolic(payload)
+            if mode == "homotopy":
+                manager = game.quest_manager
+                active = manager.active_quest if manager is not None else None
+                if active is None or active.id != "homotopy_loop":
+                    raise GameError("homotopy measurement requires the active homotopy quest")
+                completion = game.evaluate_homotopy_measurement(payload.get("origin"))
+                out = {
+                    "ok": True,
+                    "tool": "measure",
+                    "mode": "homotopy",
+                    "kind": "non_contractible_homotopy",
+                    "homotopy": game.homotopy_state(),
+                    "quest": game.quest_state(),
+                    "quest_completed": False,
+                }
+                if completion is not None:
+                    out.update({
+                        "quest": completion["quest"],
+                        "proof": completion["proof"],
+                        "quest_completed": True,
+                    })
+                return out
             if mode in ("ruler", "protractor", "angle", "angle_sum"):
                 return self._measure_tool(payload)
             distance = game.distance_between_markers(str(payload.get("a", "")), str(payload.get("b", "")))
@@ -834,6 +1183,7 @@ class GameSession:
                 "kind": "ambient_euclidean_3d",
             }
         if tool == "rope_connect":
+            self._require_capability("ropes")
             obstacles = self._visible_obstacles_now()
             node_a = self._resolve_rope_node(
                 {"type": payload.get("from_type"), "id": payload.get("from_id")}, obstacles
@@ -843,7 +1193,39 @@ class GameSession:
             )
             rope = game.connect_rope(node_a, node_b)
             return {"ok": True, "tool": "rope_connect", "rope": rope.to_dict(), **game.rope_state()}
+        if tool == "rope_pull_circumcircle":
+            self._require_capability("circumcircle")
+            names = payload.get("markers")
+            if not isinstance(names, (list, tuple)) or len(names) != 3:
+                raise GameError("rope_pull_circumcircle requires exactly three marker names")
+            nodes = [self._resolve_rope_node(
+                {"type": "marker", "id": name}, self._visible_obstacles_now()
+            ) for name in names]
+            circle = game.pull_circumcircle(nodes[0], nodes[1], nodes[2])
+            measurement = self._circumcircle_measurement(circle)
+            out: Dict[str, Any] = {
+                "ok": True,
+                "tool": "rope_pull_circumcircle",
+                "kind": "circumcircle",
+                "circumcircle": circle.to_dict(),
+                "quest": game.quest_state(),
+                "quest_completed": False,
+                **game.rope_state(),
+            }
+            completion = game.evaluate_ring_measurement(measurement)
+            if completion is not None:
+                out.update({
+                    "quest": completion["quest"],
+                    "proof": completion["proof"],
+                    "quest_completed": True,
+                })
+            return out
+        if tool == "rope_recover_circumcircle":
+            raw_id = payload.get("circle_id")
+            removed = game.recover_circumcircle(None if raw_id is None else int(raw_id))
+            return {"ok": True, "tool": "rope_recover_circumcircle", "removed": removed, **game.rope_state()}
         if tool == "rope_clear":
+            self._require_capability("ropes")
             raw_id = payload.get("rope_id")
             removed = game.clear_ropes(None if raw_id is None else int(raw_id))
             return {"ok": True, "tool": "rope_clear", "removed": removed, **game.rope_state()}

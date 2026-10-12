@@ -6,7 +6,7 @@
 ## 交互日志
 
 | 日期 | 交互内容 / 目标 | AI 执行的操作 | 涉及文件 | 结果 |
-| :--- | :--- | :--- | :--- | :--- |
+| :--- | :--- | :--- | :--- | :--- |
 | 2026-10-12 | **Task 19 修复 — 三角形需测满三角 & 探测器解锁刷新** | Angle 模式单次只返回该顶点夹角，客户端累计三个顶点后才请求 angle_sum 并触发 Quest 1（新增服务端 mode=angle_sum）；任务完成/印记增加时同步 detector_locked 并 await refreshState()，使出口探测器立即解除封印并显示真实信号 | src/the_curved_world/server.py、web/app.js、tests/test_ropes_and_tools.py、README.md、report/game_task2_report1.txt | ✅ 185 项测试通过（本地完成，未 commit/push） |
 
 | 2026-10-12 | **Task 19 修复 — 绳索长度与断绳操作** | 绳索池由 100 m/30 m 调整为 300 m/100 m（适配大尺度地图）；修复"在已连接绳子的点再点一次会断掉前一条绳子"：左键只负责选取/连接，剪断改为右键点击绳索并在左上角提示区按 y 确认 / n 取消（C 请求全剪同样确认）；更新 UI 提示与测试 | src/the_curved_world/ropes.py、web/{index.html,app.js}、tests/test_ropes_and_tools.py、README.md、report/game_task2_report1.txt | ✅ 185 项测试通过（本地完成，未 commit/push） |
@@ -38,3 +38,4 @@
 | 2026-10-11 | **Task 6 — Web 交互与双视角渲染** | 新增仅用标准库的本地 HTTP/静态服务 server.py（GameSession + 四个接口）；新增原生 HTML5/ES6 前端 web/（玩家局部视图 + 迷雾、仪表盘、上帝视角、三角内角和工具）；新增切平面角度与测地三角内角和内核；保持信息边界并新增注入内容扫描测试 | src/the_curved_world/{server,geometry,gameplay}.py、src/main.py、web/{index.html,style.css,app.js}、tests/test_server.py | ✅ 93 项测试全部通过 |
 | 2026-10-11 | **Task 5 — 交互式实时游玩** | 渲染器改为就地更新（曲面图元持久化 + 动态图元替换）；新增 `session.py` 阻塞式交互主循环（`[CurvedWorld]> ` 提示符 + 状态摘要）、`--play` 入口、`scan`/`curvature` 命令与 WASD 快捷移动、解析高斯曲率；补充 mock 输入流测试 | `src/the_curved_world/{render,session,cli,geometry,gameplay}.py`、`src/main.py`、`tests/test_session.py` | ✅ 82 项测试全部通过 |
 | 2026-10-11 | **Task 4 — 验证与可复现 Demo** | 实现固定种子 Demo 场景 `run_demo()` 与 `--demo-scenario`；补充数学审计、信息泄露审计、端到端 Demo 测试；清理未用导入；撰写最终验证报告并更新文档 | `src/the_curved_world/demo.py`、`src/main.py`、`tests/test_{math_audit,information_boundary,demo}.py`、`docs/final_report.md`、`README.md`、`docs/architecture.md` | ✅ 70 项测试全部通过（含 Task 1-3） |
+| 2026-10-12 | **统一地图能力与完整交互工具链** | 地图拆分独立模块，统一 MapCapabilities；合并 9 张地图的 chart-copy / orbit-min 支持；修复前端 twisted chart 点投影与圆环投影；逐图验证三角拉圆、全部量具接口、任务链解锁出口并可通关 | src/the_curved_world/maps/*、gameplay.py、server.py、web/*、tests/test_{map_capabilities,map_completion}.py、README.md | ✅ 全量 250 passed；node --check 通过 |

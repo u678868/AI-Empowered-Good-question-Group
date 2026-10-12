@@ -21,7 +21,15 @@ import numpy as np
 from src.the_curved_world.config import ConfigError
 from src.the_curved_world.geometry import ambient_distance
 from src.the_curved_world.manifold import wrap_parameter
-from src.the_curved_world.quest import QuestManager, TriangleMeasurement, empty_quest_state
+from src.the_curved_world.quest import (
+    HolonomyMeasurement,
+    HomotopyMeasurement,
+    ParabolicMeasurement,
+    QuestManager,
+    RingMeasurement,
+    TriangleMeasurement,
+    empty_quest_state,
+)
 from src.the_curved_world.ropes import Rope, RopeError, RopeNode, RopeSystem
 from src.the_curved_world.observations import (
     ObservationConfig,
@@ -201,6 +209,9 @@ class ExplorationGame:
         self._log: List[LogEntry] = []
         self._markers: Dict[str, Marker] = {}
         self._trajectory: List[ParameterPosition] = [self._position]
+        self._homotopy_origin_label: Optional[str] = None
+        self._homotopy_phase_u = 0.0
+        self._homotopy_phase_v = 0.0
         self._won = False
         self._update_victory()
 
@@ -259,6 +270,21 @@ class ExplorationGame:
         except RopeError as exc:
             raise GameError(str(exc)) from exc
 
+    def pull_circumcircle(self, marker_a: RopeNode, marker_b: RopeNode, marker_c: RopeNode):
+        """Pull three connected marker pegs into a circumscribed geodesic circle."""
+        try:
+            return self._ropes.pull_circumcircle(
+                marker_a, marker_b, marker_c, surface=self._player.surface
+            )
+        except RopeError as exc:
+            raise GameError(str(exc)) from exc
+
+    def recover_circumcircle(self, circle_id: int | None = None) -> int:
+        try:
+            return self._ropes.recover_circumcircle(circle_id)
+        except RopeError as exc:
+            raise GameError(str(exc)) from exc
+
     def rope_state(self) -> Dict[str, object]:
         return self._ropes.state_payload()
 
@@ -294,6 +320,160 @@ class ExplorationGame:
             "quest_id": quest.id,
             "quest": self._quest_manager.state_payload(),
             "proof": self._quest_manager.completion_payload(quest, result),
+        }
+
+    def evaluate_ring_measurement(self, measurement: RingMeasurement) -> Dict[str, object] | None:
+        """Feed a closed rope-ring measurement into the active quest (Task 20)."""
+        if self._quest_manager is None:
+            return None
+        quest = self._quest_manager.active_quest
+        if quest is None:
+            return None
+        result = self._quest_manager.evaluate_ring_measurement(measurement)
+        if result is None or not result.completed:
+            return None
+        self._update_victory()
+        return {
+            "quest_id": quest.id,
+            "quest": self._quest_manager.state_payload(),
+            "proof": self._quest_manager.completion_payload(quest, result),
+        }
+
+    def evaluate_holonomy_measurement(self, measurement: HolonomyMeasurement) -> Dict[str, object] | None:
+        """Feed a parallel-transport result into Quest 3 (Task 21)."""
+        if self._quest_manager is None:
+            return None
+        quest = self._quest_manager.active_quest
+        if quest is None:
+            return None
+        result = self._quest_manager.evaluate_holonomy_measurement(measurement)
+        if result is None or not result.completed:
+            return None
+        self._update_victory()
+        return {
+            "quest_id": quest.id,
+            "quest": self._quest_manager.state_payload(),
+            "proof": self._quest_manager.completion_payload(quest, result),
+        }
+
+    def evaluate_parabolic_measurement(self, measurement: ParabolicMeasurement) -> Dict[str, object] | None:
+        """Feed three parabolic pegs into Quest 4 (Task 22)."""
+        if self._quest_manager is None:
+            return None
+        quest = self._quest_manager.active_quest
+        if quest is None:
+            return None
+        result = self._quest_manager.evaluate_parabolic_measurement(measurement)
+        if result is None or not result.completed:
+            return None
+        self._update_victory()
+        return {
+            "quest_id": quest.id,
+            "quest": self._quest_manager.state_payload(),
+            "proof": self._quest_manager.completion_payload(quest, result),
+        }
+
+    def evaluate_homotopy_measurement(self, origin_label: Optional[str] = None) -> Dict[str, object] | None:
+        """Close the origin beacon and evaluate the unwrapped phase (Task 23)."""
+        if self._quest_manager is None:
+            return None
+        quest = self._quest_manager.active_quest
+        if quest is None or quest.id != "homotopy_loop":
+            return None
+        label = str(origin_label or self._homotopy_origin_label or "")
+        if not label or label not in self._markers:
+            raise GameError("homotopy loop needs an origin marker named O")
+        origin = self._markers[label]
+        surface = self._player.surface
+        current = self._player.position(self._position)
+        origin_point = self._player.position(origin.position)
+        closure_distance = ambient_distance(current, origin_point)
+        measurement = HomotopyMeasurement(
+            origin_label=label,
+            phase_u=float(self._homotopy_phase_u),
+            phase_v=float(self._homotopy_phase_v),
+            closure_distance=float(closure_distance),
+            capture_radius=float(self._quest_manager.features.homotopy_capture_radius),
+            current_label=label,
+        )
+        result = self._quest_manager.evaluate_homotopy_measurement(measurement)
+        if result is None or not result.completed:
+            return None
+        self._homotopy_origin_label = None
+        self._homotopy_phase_u = 0.0
+        self._homotopy_phase_v = 0.0
+        self._update_victory()
+        return {
+            "quest_id": quest.id,
+            "quest": self._quest_manager.state_payload(),
+            "proof": self._quest_manager.completion_payload(quest, result),
+        }
+
+    def homotopy_state(self) -> Dict[str, object]:
+        """Player-visible phase tracking for Quest 5, if it is active."""
+        if self._quest_manager is None:
+            return {}
+        quest = self._quest_manager.active_quest
+        if quest is None or quest.id != "homotopy_loop":
+            return {}
+        label = self._homotopy_origin_label
+        payload: Dict[str, object] = {
+            "origin_label": label,
+            "phase_u": float(self._homotopy_phase_u),
+            "phase_v": float(self._homotopy_phase_v),
+            "phase_max_pi": max(abs(self._homotopy_phase_u), abs(self._homotopy_phase_v)) / math.pi,
+            "winding_u": self._homotopy_phase_u / (2.0 * math.pi),
+            "winding_v": self._homotopy_phase_v / (2.0 * math.pi),
+            "capture_radius": float(self._quest_manager.features.homotopy_capture_radius),
+            "closure_distance": None,
+        }
+        if label and label in self._markers:
+            marker = self._markers[label]
+            payload["origin_position"] = [
+                float(marker.position[0]),
+                float(marker.position[1]),
+            ]
+            payload["closure_distance"] = float(
+                ambient_distance(
+                    self._player.position(self._position),
+                    self._player.position(marker.position),
+                )
+            )
+        return payload
+
+    def calibrate_tangent_vector(self, marker_name: str) -> Dict[str, object]:
+        """Anchor a unit tangent vector at a player marker (Task 21)."""
+        name = str(marker_name).strip()
+        marker = self._markers.get(name)
+        if marker is None:
+            raise GameError(f"unknown marker {name!r}")
+        surface = self._player.surface
+        u, v = (float(marker.position[0]), float(marker.position[1]))
+        normal = np.asarray(surface.normal(u, v), dtype=float)
+        r_u, r_v = _tangent_vectors(surface, u, v)
+        tangent_one = r_u - float(r_u @ normal) * normal
+        if float(np.linalg.norm(tangent_one)) < 1e-12:
+            tangent_one = r_v - float(r_v @ normal) * normal
+        tangent_one = tangent_one / max(float(np.linalg.norm(tangent_one)), 1e-15)
+        tangent_two = np.cross(normal, tangent_one)
+        forward = math.cos(self._yaw) * tangent_one + math.sin(self._yaw) * tangent_two
+        e, f, g = surface.first_fundamental_form(u, v)
+        b1 = float(forward @ r_u)
+        b2 = float(forward @ r_v)
+        determinant = float(e) * float(g) - float(f) * float(f)
+        if abs(determinant) < 1e-12:
+            raise GameError("cannot calibrate a tangent vector at a degenerate chart point")
+        du = (float(g) * b1 - float(f) * b2) / determinant
+        dv = (float(e) * b2 - float(f) * b1) / determinant
+        norm = math.hypot(du, dv)
+        if norm < 1e-12:
+            raise GameError("calibration direction is degenerate")
+        vector = (du / norm, dv / norm)
+        return {
+            "marker": name,
+            "position": [u, v],
+            "vector": [float(vector[0]), float(vector[1])],
+            "heading_radians": float(self._yaw),
         }
 
     @property
@@ -500,7 +680,9 @@ class ExplorationGame:
                     self._position, candidate, self._player_radius
                 )
             if resolved is not None and not self._blocked(resolved):
+                previous = self._position
                 self._position = resolved
+                self._record_homotopy_delta(self._position[0] - previous[0], self._position[1] - previous[1])
                 self._trajectory.append(self._position)
                 self._steps += 1
                 self._effective_steps += 1.0 / max(float(penalty["speed_scale"]), 1e-9)
@@ -510,7 +692,9 @@ class ExplorationGame:
                                   won=self._won, collided=True)
             return MoveResult(self._position, moved=False, clamped=clamped,
                               won=self._won, collided=True)
+        previous = self._position
         self._position = candidate
+        self._record_homotopy_delta(self._position[0] - previous[0], self._position[1] - previous[1])
         self._trajectory.append(self._position)
         self._steps += 1
         self._effective_steps += 1.0 / max(float(penalty["speed_scale"]), 1e-9)
@@ -531,15 +715,12 @@ class ExplorationGame:
         dv = wrapped[1] - previous[1]
         surface = self._player.surface
         if getattr(surface, "periodic", False):
-            # Ask the chart for the nearest representative instead of wrapping by a
-            # hardcoded 2 pi: the Klein bottle's u period is 4 pi and the
-            # projective plane has four sheets.
             relative = getattr(surface, "chart_relative", None)
             if callable(relative):
                 near = relative(previous[0], previous[1], wrapped[0], wrapped[1])
                 du = near[0] - previous[0]
                 dv = near[1] - previous[1]
-            else:  # pragma: no cover - defensive for duck-typed periodic surfaces
+            else:  # pragma: no cover - duck-typed periodic surfaces
                 du = wrap_parameter(du)
                 dv = wrap_parameter(dv)
         if math.hypot(du, dv) > 1e-12:
@@ -547,6 +728,7 @@ class ExplorationGame:
             self._last_slope = penalty
             self._effective_steps += 1.0 / max(float(penalty["speed_scale"]), 1e-9)
         self._position = wrapped
+        self._record_homotopy_delta(du, dv)
         self._trajectory.append(self._position)
         self._update_victory()
         return MoveResult(self._position, moved=True, clamped=False, won=self._won)
@@ -598,6 +780,11 @@ class ExplorationGame:
             label=observation.label,
         )
         self._markers[cleaned] = marker
+        active = self._quest_manager.active_quest if self._quest_manager is not None else None
+        if active is not None and active.id == "homotopy_loop" and self._homotopy_origin_label is None:
+            self._homotopy_origin_label = cleaned
+            self._homotopy_phase_u = 0.0
+            self._homotopy_phase_v = 0.0
         return marker
 
     def triangle_angle_sum(self, name_a: str, name_b: str, name_c: str) -> Dict[str, object]:
@@ -629,13 +816,11 @@ class ExplorationGame:
             "excess": total - math.pi,
         }
     def distance_between_markers(self, name_a: str, name_b: str) -> float:
-        """Distance between two player-known markers, under the world's policy.
+        """Ambient (straight-line 3D) distance between two player-known markers.
 
         The hidden exit is never a valid endpoint because endpoints are marker
-        names only. On the default policy this is the documented Euclidean
-        distance, never a path length along the surface; a quotient world
-        (projective plane) reports the distance between the *nearest*
-        realizations, because that is what "the same place" means there.
+        names only. This is the documented Euclidean distance, never a path
+        length along the surface.
         """
         marker_a = self._markers.get(name_a)
         marker_b = self._markers.get(name_b)
@@ -761,10 +946,7 @@ class ExplorationGame:
         x, y = self._position
         delta = 1e-3
         player_point = np.asarray(surface.position(x, y), dtype=float)
-        # Point at the nearest realization of the exit: on a quotient world the
-        # antipodal twin is the same place, and the far one is a red herring.
-        candidates = [np.asarray(point, dtype=float) for point in self._world.exit_realizations()]
-        exit_point = min(candidates, key=lambda point: float(np.linalg.norm(point - player_point)))
+        exit_point = np.asarray(self._world.exit_position(), dtype=float)
         direction = exit_point - player_point
         length = float(np.linalg.norm(direction))
         if length < 1e-9:
@@ -813,26 +995,33 @@ class ExplorationGame:
     def _clamp(self, position: ParameterPosition) -> Tuple[ParameterPosition, bool]:
         surface = self._player.surface
         if getattr(surface, "periodic", False):
-            # Closed manifold: wrap the parameters instead of clamping. There is
-            # no boundary wall, so a move never counts as clamped.
-            #
-            # The wrap goes through the surface itself, because the chart is not
-            # always the plain periodic square: the Klein bottle's 2*pi shift in
-            # u mirrors v, so it publishes (4*pi, 2*pi) instead. Wrapping by the
-            # published periods is exactly the identity on the surface, which is
-            # what keeps the player on the same 3D point across the seam.
-            wrapped = surface.wrap(position[0], position[1])
-            return (float(wrapped[0]), float(wrapped[1])), False
+            # Closed manifold: wrap through the surface itself. Some charts
+            # (Klein bottle / projective plane) use non-(2*pi, 2*pi) periods.
+            wrap = getattr(surface, "wrap", None)
+            if callable(wrap):
+                wrapped = wrap(position[0], position[1])
+                return (float(wrapped[0]), float(wrapped[1])), False
+            return (wrap_parameter(position[0]), wrap_parameter(position[1])), False
         domain = surface.domain
         x = min(max(position[0], domain.x_min), domain.x_max)
         y = min(max(position[1], domain.y_min), domain.y_max)
         return (x, y), (x != position[0] or y != position[1])
 
+    def _record_homotopy_delta(self, du: float, dv: float) -> None:
+        if self._quest_manager is None:
+            return
+        quest = self._quest_manager.active_quest
+        if quest is None or quest.id != "homotopy_loop" or self._homotopy_origin_label is None:
+            return
+        if getattr(self._player.surface, "periodic", False):
+            du = wrap_parameter(du)
+            dv = wrap_parameter(dv)
+        self._homotopy_phase_u += float(du)
+        self._homotopy_phase_v += float(dv)
+
     def _update_victory(self) -> None:
         if self._won:
             return
-        # The world owns the distance policy (plain Euclidean everywhere except
-        # quotient worlds such as the antipodal projective plane).
         distance = self._world.ambient_distance(self._position, self._world.exit)
         sealed = self._quest_manager is not None and not self._quest_manager.exit_unlocked
         capture = float(getattr(self._config, "effective_capture_radius", self._config.capture_radius))
