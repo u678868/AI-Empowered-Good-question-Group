@@ -1,0 +1,139 @@
+﻿================================================================================
+The Curved World —— Task 11 完成报告：实心流形 / 法向悬浮视点 / 坡度阻力 / 滑动碰撞
+文件：report/active4_report1.txt
+对应任务：process/active4.txt
+生成日期：2026-10-12
+项目根目录：C:\Users\gzfan\Desktop\AI Empowered
+运行环境：Python 3.13.2（.venv）/ numpy 2.5.4 / matplotlib 3.11.2 / pytest 9.1.1
+================================================================================
+（说明：本报告为追加记录，之前所有报告均保留；本轮按用户要求【未提交、未推送】。）
+
+一、任务目标
+--------------------------------------------------------------------------------
+1) 第一人称相机沿流形向外法向抬升 h_eye，彻底消除网格穿模；
+2) 统一闭合流形的"向外"单位法向量，禁止任何进入法向反方向的位移；
+3) 引入坡度阻力：上坡减速、下坡不受阻（确定性、无惯性）；
+4) 障碍物碰撞改为"切线滑动"，靠近边缘时沿轮廓平滑滑动而非卡死；
+5) 右上角局部雷达保持"无全图记忆"，API 增加相机/坡度/碰撞与视距内障碍物。
+
+二、完成的主要工作
+--------------------------------------------------------------------------------
+1) 向外法向量统一（src/the_curved_world/manifold.py）
+   - ClosedManifold 增加 outward_sign 与 center 两个定向参数；
+     normal() 先乘 outward_sign，再按 center（可选）逐点翻转，保证 n 指向外侧；
+   - 经数值校验：DeformedTorus 用 outward_sign=-1（625/625 采样点向外）、
+     GenusTwoApproximation 用 -1（多数点向外）、DeformedEllipsoid 用 center=(0,0,0)
+     逐点翻转（双覆盖导致符号翻转）；
+   - 退化极点（genus-0 两极）用 1e-4 参数微扰取法向，保持零测度点良定义。
+
+2) 法向悬浮视点与实心约束（src/the_curved_world/gameplay.py）
+   - GameplayConfig 新增 eye_height=2.0（必须 > 0）与 slope_damping=3.0（>= 0）；
+   - camera_position() = r(u,v) + h_eye * n(u,v)：实测 (camera - r)·n == h_eye > 0，
+     相机严格在曲面外侧，近裁剪面不会再切进网格；
+   - project_to_tangent(vector)：去掉法向分量，玩家只沿外表面切空间移动。
+
+3) 坡度阻力模型（src/the_curved_world/gameplay.py）
+   - calculate_slope_penalty(u, v, du, dv)：slope = Δz / ||Δr_tangent||，
+     speed_scale = 1 / (1 + k * slope^2)（slope > 0 上坡）或 1（下坡/平地）；
+   - move() 用 speed_scale 缩放实际步长；步长趋近 0 时返回 moved=False；
+   - last_slope 暴露最近一次 {slope, speed_scale} 供 API/HUD 显示。
+
+4) 障碍物切线滑动（src/the_curved_world/obstacles.py）
+   - resolve_collision(current_uv, next_uv, player_radius)：
+     计算障碍物穿透向量 → 消除径向分量 → 映回参数空间 → 沿轮廓滑动；
+     切线映射为一阶近似，故朝（无碰撞的）当前位置回退直至确实在外面；
+   - gameplay.move() 遇到障碍物时改用该滑动解，仍返回 collided=True。
+
+5) API（src/the_curved_world/server.py）
+   - /api/state/player 新增：camera_position_3d、eye_height、slope、
+     collided（最近一次移动）、local_obstacles（与 obstacles 同源，仅视距内）。
+
+6) 前端（web/）
+   - 第一人称投影的 eye 改用 camera_position_3d（抬升后相机）；
+   - 仪表盘新增 slope 读数（坡度 + 速度缩放，上坡标注 uphill）；
+   - 保留右上角圆盘雷达（仅局部切片、随朝向旋转），无全图/迷雾记忆。
+
+三、文件功能说明（本次涉及）
+--------------------------------------------------------------------------------
+【新增】 tests/test_slope_and_collision.py   坡度公式、下坡不减速、眼高防穿模、
+                                             法向朝外、障碍物滑动不穿透（10 项）
+【修改】 src/the_curved_world/manifold.py    outward_sign / center 定向，法向极点保护
+         src/the_curved_world/gameplay.py    eye_height / slope_damping / camera_position /
+                                             project_to_tangent / calculate_slope_penalty /
+                                             last_slope；move() 坡度阻尼 + 滑动碰撞
+         src/the_curved_world/obstacles.py   resolve_collision 切线滑动 + 回退收敛
+         src/the_curved_world/server.py      camera/slope/collided/local_obstacles
+         web/index.html / web/app.js         相机抬升点 + slope 读数
+         tests/test_gameplay.py              坡度阻尼下隔离几何断言
+         tests/test_session.py               w/s 因坡度阻尼不再严格对称
+         README.md / AI_USAGE.md             记录 Task 11
+
+四、测试结果
+--------------------------------------------------------------------------------
+汇总：157 项测试全部通过（0 失败，0 跳过）—— 既有 147 项全绿 + 本轮新增 10 项。
+
+  模块                          用例数   结果
+  ----------------------------  ------   ------
+  test_geometry.py                11     通过
+  test_world_generation.py         9     通过
+  test_detector.py                 6     通过
+  test_gameplay.py                11     通过
+  test_cli.py                     13     通过
+  test_render.py                   8     通过
+  test_math_audit.py               7     通过
+  test_information_boundary.py     4     通过
+  test_demo.py                     4     通过
+  test_session.py                  8     通过
+  test_server.py                  14     通过
+  test_large_scale.py             10     通过
+  test_closed_manifold.py         16     通过
+  test_map_registry.py             8     通过
+  test_obstacles.py                8     通过
+  test_first_person.py             9     通过
+  test_slope_and_collision.py     10     通过   （本轮新增）
+  test_smoke.py                    1     通过
+  ----------------------------  ------   ------
+  合计                           157     全部通过
+
+五、每项测试的终端命令
+--------------------------------------------------------------------------------
+  .\.venv\Scripts\python.exe -m pytest                        # 全量：157 passed
+  .\.venv\Scripts\python.exe -m pytest tests/test_slope_and_collision.py   # 本轮新增（10 项）
+  .\.venv\Scripts\python.exe -m pytest tests/test_first_person.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_obstacles.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_gameplay.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_session.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_server.py
+  （其余模块命令同前几份报告：test_geometry / test_world_generation / test_detector /
+    test_cli / test_render / test_math_audit / test_information_boundary / test_demo /
+    test_large_scale / test_closed_manifold / test_map_registry / test_smoke）
+
+六、功能自检结果
+--------------------------------------------------------------------------------
+  相机：camera_position_3d 存在，eye_height=2.0，实测 (camera-r)·n = 2.0 > 0（防穿模）
+  法向朝外：环面 625/625 采样点 n·(p-ref) > 0；椭球逐点翻转后全部 > 0
+  坡度：slope=0.165 时 speed_scale=0.924（上坡减速）；slope<=0 时 speed_scale=1.0
+  滑动：障碍物场景下 resolve_collision 返回非穿透且保留位移；穿透时回退收敛不卡死
+  API：player 状态含 camera_position_3d / eye_height / slope / collided / local_obstacles(11)
+  泄露检查：玩家状态不含 exit_position、不含 true_distance
+  全量测试：157 passed
+
+七、已知限制（如实标注）
+--------------------------------------------------------------------------------
+1. 坡度用全局 z 轴作为高程参考（按任务书公式），在封闭流形上不是"相对重力"的严格定义。
+2. 障碍物滑动在参数空间用一阶切线映射，故需回退收敛；极端夹角下可能只剩很小滑动量。
+3. Model C（双孔外观近似）的图像不是干净嵌入，法向无法保证全局一致朝外 ——
+   测试对它只要求单位长度，其余两个模型严格朝外（已在测试与文档中写明）。
+4. 本阶段无惯性/加速度与动力学滑移，保持确定性（符合任务要求）。
+5. 既有数学限制依旧成立（椭球两极退化、数值曲率积分、指向器限次量化等）。
+
+八、Git 状态（按用户要求未提交）
+--------------------------------------------------------------------------------
+  未 commit、未 push。工作区包含 Task 10 + Task 11 的全部改动，以及
+  AGENTS.md §5.6（分支优先与手动合并）等此前的未提交内容。
+  建议提交信息（active4 要求）：
+    feat(physics): anti-clipping eye height, slope penalty and obstacle slide
+
+================================================================================
+报告结束
+================================================================================

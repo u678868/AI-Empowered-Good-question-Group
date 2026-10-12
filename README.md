@@ -306,6 +306,170 @@ class MyMap:
 **安全边界**：`mode == "player"` 时 `/api/state/debug` **一律** 403，
 无论客户端发什么请求；只有大厅选择全知模式或以 `--debug` 启动才放行。
 
+## 第一人称流形视角、雷达小地图与障碍物（Task 10）
+
+主画布改为**第一人称切空间视角**：玩家贴在曲面上向前看，`up` 取曲面法向，
+因此在切平面内维护朝向角 `yaw` 并构造正交视线标架 `{forward, right, up}`；
+前方地形会随曲率向下弯曲 / 向上隆起，呈现置身弯曲世界的透视。
+
+**控制**（前端）：
+
+| 按键 | 作用 |
+| :--- | :--- |
+| `W` / `S`（或 ↑/↓） | 沿当前朝向**前进 / 后退** |
+| `A` / `D`（或 ←/→） | **原地转向**（改变 `yaw`） |
+| 鼠标拖拽主视窗 | 转向 |
+| `1` / `2` / `3` / `4` | 测距尺 / 测角仪 / 高斯曲率 / 指向器 |
+| `G` / `Esc` | 打开 / 关闭全知上帝视角 |
+
+**局部雷达小地图（右上角 HUD）**
+
+- **彻底移除全局探索记忆与迷雾揭图**：不再记录历史足迹、不保留走过的区域；
+- 雷达只渲染以玩家为中心、固定小半径 `R_radar` 的**即时局部切片**，以及
+  视距内的**障碍物红点**与附近标记点；雷达随 `yaw` 旋转（朝向始终朝上）；
+- 因此无法通过盲目扫图"涂满地图"来找出口，必须依赖测量工具推理。
+
+**两阶段世界生成与障碍物系统**（`src/the_curved_world/obstacles.py`）
+
+1. 先独立生成连续且 C-infinity 光滑的封闭流形底层曲面；
+2. 再按种子在曲面上**离散散布静态障碍物**（`boulder` / `rift` / `pillar`），
+   每个障碍物记录参数坐标 `(u, v)`、三维位置与碰撞半径。
+
+- **安全边距**：出生点与隐藏出口周围强制清空（默认 9.0 环境距离），不会堵死出口或开局卡死；
+- **确定性**：同一 `(地图, 种子)` 生成的障碍物完全一致；
+- **碰撞**：用**环境三维距离**判定（自然处理周期接缝），撞上时阻止穿透并尝试沿参数轴滑动，
+  返回 `collided: true`（前端提示 `blocked by obstacle`）。
+
+**信息边界**：`/api/state/player` 只返回**渲染补丁范围内**的障碍物（`vision_radius` 以内），
+绝不返回远端障碍物、出口坐标或真实距离。
+
+**接口**
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| POST | `/api/action/move` | `{"action":"step","direction":"forward"|"backward"|"strafe_left"|"strafe_right","steps":n}` 或 `{"action":"turn","angle":d}` |
+| GET | `/api/state/player` | 追加 `yaw`、`forward_3d` / `right_3d` / `up_3d`、视野内 `obstacles`、补丁三维网格 `X/Y/Z` |
+| GET | `/api/state/debug` | 全局网格 + 全部障碍物 + 出口（仅全知模式 / `--debug`） |
+
+## 实心流形、法向悬浮视点、坡度阻力与滑动碰撞（Task 11）
+
+**法向外推悬浮视点（防穿模）**
+
+- 第一人称相机不再落在零厚度曲面上，而是沿**向外**单位法向抬升：
+  `P_camera = r(u,v) + h_eye · n(u,v)`（默认 `h_eye = 2.0`），近裁剪面始终在曲面外侧；
+- `ClosedManifold.normal()` 统一返回**向外**法向量：环面族用符号修正，
+  双覆盖的椭球按点判定翻转，退化极点 1e-4 参数微扰后取值（零测度点仍保持良定义）；
+- `ExplorationGame.camera_position()` 暴露相机点，`project_to_tangent()` 把任意位移投影回切平面，
+  保证玩家只沿外表面切空间移动。
+
+**坡度阻力模型**
+
+- `calculate_slope_penalty(u, v, du, dv)`：`slope = Δz / ||Δr_tangent||`；
+- 上坡（`slope > 0`）：`effective_step = step / (1 + κ · slope²)`（默认 κ = 3.0）；
+- 下坡 / 平地（`slope ≤ 0`）：不受阻，`effective_step = step`；本阶段无惯性，保持确定性；
+- 最近一次坡度与速度缩放通过 `/api/state/player` 的 `slope` 字段暴露给 HUD。
+
+**障碍物滑动碰撞（tangent sliding）**
+
+- `ObstacleField.resolve_collision(current_uv, next_uv, player_radius)`：
+  计算穿透向量 → 去掉径向分量 → 把剩余位移映回参数空间 → 沿障碍物轮廓平滑滑动；
+  切线映射只是一阶近似，因此会朝（无碰撞的）当前位置回退直到确实在障碍物之外；
+- `POST /api/action/move` 返回 `collided: true`，前端提示 `blocked by obstacle`；
+- `/api/state/player` 新增 `camera_position_3d` / `eye_height` / `slope` / `collided` /
+  `local_obstacles`（仅 `R_view` 内，绝不泄露全图障碍物与出口）。
+
+## 渲染平滑化、草地着色与程序化低模自然物（Task 12）
+
+- **高分屏**：Canvas 物理像素与 CSS 尺寸绑定（`width = rect.width * dpr`）+ `ctx.scale(dpr, dpr)`，消除边缘模糊；
+- **60FPS 常驻渲染循环**：`requestAnimationFrame` 主循环 + `RenderEngine`（`view.cam` / `view.yaw`），
+  相机位置与朝向按 `alpha = 0.18` 做 LERP / 最短角插值，行走不再阶跃；
+- **草地生态着色**：基底自然草绿 `#3d7e34 → #58a542`，按高度泛黄、按坡度（由第一基本形式 E/G 推得）转苔藓/裸土暗绿；
+  网格线改为半透明微光，兼顾数学线框感与自然沉浸感；
+- **程序化低模自然物**：`drawLowPolyTree`（深褐树干 + 3 层墨绿四棱锥树冠）、
+  `drawLowPolyRock`（6 边形不规则块体 + 苔绿顶面）；障碍物按深度由远及近绘制（画家算法）；
+- **障碍物生态分类**：`Obstacle.kind ∈ {tree, rock}`，按种子 60% 树木 / 40% 岩石；雷达上树木=深绿点、岩石=灰褐点；
+- **尺度平滑调优**：默认环面主半径 `30 → 45`（+50%）、管半径 `10 → 14`，高阶微扰振幅下调（1.4/1.1/0.7 → 0.95/0.75/0.45）使坡度更连续；
+  局部切空间网格采样 `33×33 → 49×49`；`detector_scale 16→24`、`min_separation 18→27`、捕获半径 `3.0→4.5`；
+- **安全边界不变**：`/api/state/player` 仍不返回出口坐标、真实距离或视距外障碍物；碰撞滑动、法向眼高、安全区逻辑保持不变。
+
+## 360° 自由视角与第一人称手持工具栏（Task 13）
+
+- **Pointer Lock 360° look**：点击画布锁定鼠标，`mousemove.movementX/Y` 直接驱动视线；
+  yaw 无限制连续旋转，pitch 限制在 ±1.48 rad（±85°）避免万向节锁；每帧按 alpha=0.18 插值；
+- **视线与移动解耦**：相机 forward = cos(pitch)·forward_tangent + sin(pitch)·n；
+  但 W/S/A/D 始终沿**地表切平面**前进/后退/侧移，贴地滑行不受抬头低头影响；
+- **底部物品栏（5 槽）**：1 罗盘(探测器) · 2 曲率仪 · 3 测角仪 · 4 末影光标 · 5 拓扑信标；
+  数字键 `1`-`5`、鼠标滚轮或点击槽位切换；左键使用；
+- **手持拟物模型**：右下角程序化 Canvas viewmodel（黄铜罗盘/曲率陀螺仪/测角器/能量球/测绘短杖），
+  带呼吸与行走摆动（bobbing）；罗盘指针随信号升降震颤、外圈泛蓝光；
+- **世界内特效（worldFX）**：使用末影光标会在视界内生成**飞行的 3D 光球粒子**（沿切平面方位 + 法向俯仰飞出并消散）；
+  使用信标会在脚下生成**自发光棱柱**（呼吸光效）；
+- **安全边界不变**：光球/信标仅由本地已有的量化方位与局部状态驱动，服务端从不提前传输出口坐标。
+
+## 宏观平缓流形、客户端物理接管与柔性碰撞（Task 14）
+
+- **宏观超大平缓流形**：默认环面 `ring 45 → 130`、`tube 14 → 45`；高阶微扰降至 0.45/0.35/0.20 且降阶，
+  百米视距内局部高斯曲率约 1e-4 量级（微小但严格非零），地表如温和草原；
+  `detector_scale 24 → 60`、`min_separation 27 → 70`、`capture_radius 4.5 → 12.0` 同步放大；
+- **客户端零延迟物理接管**：`InputController` 维护 `keysDown`，60FPS 帧循环内直接积分本地位移
+  （切平面方向 × speed × dt），画面无网络回拉；**低频同步**：停止移动或每 250ms 通过新增的
+  `POST /api/action/sync_position` 上报本地 (u,v)，服务端回传曲率/坡度/探测器读数/视距内障碍物，
+  并保留世界状态审计与胜利判定（`POST /api/action/move` 完全兼容 CLI 与既有测试）；
+- **柔性连续滑动碰撞**：本地每帧遍历视距内障碍物做球体距离判定，穿透时沿法向外推、
+  仅保留切向分量 → 撞树可顺边"蹭"过，不卡死；上坡阻力继续生效；
+- **远景空气雾效**：超过 `0.7 × R_view` 的网格与障碍物颜色向淡青灰天空色渐变，
+  隐藏局部采样边界，呈现开阔无垠的草原感。
+
+## 无缝二维俯视切空间地图、硬碰撞与微地貌晕渲（Task 15）
+
+> 背景：Task 13 的第一人称伪 3D 视锥在浏览器里不平滑、穿模多。Task 15 彻底移除第一人称投影，
+> 回归"玩家恒定居中的纯二维局部俯视地图"，但保留后端全部微分几何、探测器与信息边界。
+
+- **纯 2D 局部切空间俯视**：`web/app.js` 的 `drawTopDownWorld()` 取代 `drawFirstPerson()`；
+  玩家以"圆点 + 朝向箭头"永远绘制在画布中心；`web/index.html` 删除右上角雷达 `#radar-canvas`
+  （主视图本身就是局部地图）；
+- **周期相对包裹的无缝滚动**：地物一律用相对参数差
+  `Δu = wrap(u_obj − u_player)`、`Δv = wrap(v_obj − v_player)` 投影到屏幕；可视半径
+  `patch.radius ≈ 1.38 < π`，任何可见地物都不会落在 `wrap` 的 ±π 跳变点上，
+  越过周期接缝时画面不闪、不跳、不撕裂；有界地图（`planar_landscape`）自动改用线性差值；
+- **微地貌晕渲（不泄露全局拓扑）**：对服务端局部补丁 `z` 做双线性采样，叠加**半透明等高线**
+  （对 `z` 分层做 marching-squares）与**高程调色**（低处深绿、高处黄绿），并用有限差分法向量
+  与固定光照方向做**漫反射明暗**；只在局部可见，无法据此推断甜甜圈/球/双孔全局形状；
+- **上坡阻尼与坡度 HUD**：沿朝向用 `slope = Δz / ‖dr_tangent‖` 求局部坡度，
+  `v_eff = v_base / (1 + κ·slope²)`（κ=3，与 `GameplayConfig.slope_damping` 一致），下坡/平地全速；
+  仪表盘保留轻量坡度读数；
+- **刚性圆盘硬碰撞**：障碍物半径按**自身所在位置的局部度量**换算成参数半径，玩家为半径
+  `player_radius` 的圆盘；每帧若尝试位移进入圆盘，就把位移沿碰撞法向截断（不允许渗透），
+  保留切向分量 → 撞树/岩石被硬挡住，并沿边缘顺滑滑开、不卡死；
+- **60FPS 本地控制 + 低频同步**：本地 `requestAnimationFrame` 以 WASD 连续积分，
+  每 ~200ms 或停止时 `POST /api/action/sync_position` 上报 `(u,v)`；
+  服务端 `GET /api/state/player` / `POST /api/action/move` / `sync_position` 契约保持不变；
+- **沉浸式热栏保留并 2D 化**：`1` 罗盘（扩散共振波纹）、`2` 曲率仪（凸/凹/平的局部读数卡）、
+  `3` 测角仪、`4` 末影光标（从中心沿服务端量化方位射出淡出光球拖尾）、
+  `5` 标记信标（脚下发光图钉）；全部只使用已有的局部/量化数据，服务端从不提前传输出口坐标或真实距离。
+## 增大障碍物体积、通关结算弹窗与提交封装（Task 16）
+
+- **更大的自然障碍物（按地图尺度调参）**：默认 `WorldConfig.obstacle_radius` 1.2 -> 3.5、
+  `obstacle_safe_margin` 6.0 -> 12.0；四张内置地图同步放大（并保证生成必然成功、出生点与出口安全距离严格成立）：
+
+  | 地图 | 障碍数量 | 半径（原 -> 新） | 安全边距（原 -> 新） |
+  | :--- | :--- | :--- | :--- |
+  | `torus_genus1` | 30 | 4.0 -> 4.2 | 32 -> 45 |
+  | `ellipsoid_genus0` | 8 | 1.3 -> 2.4 | 7 -> 12 |
+  | `double_torus` | 16 | 1.3 -> 4.5 | 7 -> 12 |
+  | `planar_landscape` | 18 | 1.8 -> 4.5 | 8 -> 16 |
+
+- **所见即所撞的前端半径**：`web/app.js` 把障碍物三维半径按其**所在位置**的局部度量换算成参数半径，
+  绘制半径与硬碰撞圆盘共用同一 `obstacleParam`（最小像素半径 7 -> 12），并额外绘制玩家的碰撞体半径环；
+- **通关结算弹窗 `#victory-modal`**：当服务端返回 `won: true` 时弹出毛玻璃结算弹窗（轻量庆祝微光动画），
+  展示步数、探测器读数次数、标记数、耗时、地图、拓扑与种子；提供 **Continue Free Roam**（关闭弹窗、
+  顶部 HUD 出现 `Cleared` 徽章，可继续测量/截图）与 **Return to Lobby**（关闭弹窗并重新呼出启动大厅）两个出口；
+- **纯英文 UI**：新增的弹窗与按钮文案全部为英文，避免编码乱码与中文字符测试报警；
+- **回归测试**：新增 `tests/test_obstacle_scale.py` 固定新尺度并验证四张地图在多个种子下仍能生成、
+  且障碍物与出生点/出口的安全距离始终 >= `obstacle_safe_margin`；
+- **提交封装**：`scripts/package_submission.py` 新增 `--output` 参数（默认仍是 `submission/`），
+  可把 `src/`、`web/`、`tests/`、`docs/`、README、AI_USAGE、ai-logs、截图与 DEMO_LINK 打包为可复现产物；
+  按 `AGENTS.md` 第 5.6 条，本轮以 `codex/*` 分支提交，由用户在主仓库手动合并。
 ## 目录结构
 
 ```
@@ -349,7 +513,7 @@ AI Empowered/
 | `src/the_curved_world/cli.py` | `GameCLI`：命令解析、呈现、视图切换 |
 | `src/the_curved_world/session.py` | `run_interactive_session()`：阻塞式交互主循环（状态摘要 + 输入流可注入） |
 | `src/the_curved_world/server.py` | `GameSession` + `CurvedWorldHandler`：本地 JSON API 与静态文件服务（仅标准库） |
-| `web/index.html` / `web/style.css` / `web/app.js` | Web 前端：玩家局部视图（迷雾）、仪表盘、上帝视角（调试） |
+| `web/index.html` / `web/style.css` / `web/app.js` | Web 前端：二维局部俯视切空间地图（Task 15）、迷雾与地形晕渲、仪表盘、上帝视角（调试） |
 | `src/the_curved_world/demo.py` | `run_demo()`：可复现的完整 Demo 场景 |
 | `src/main.py` | 入口：终端游戏 / `--demo` / `--render` / `--view` |
 | `tests/test_geometry.py` | 曲面几何测试 |
@@ -362,8 +526,11 @@ AI Empowered/
 | `tests/test_large_scale.py` | 大尺度域、坐标钳制、第一基本形式、高斯-博内、指向器测试 |
 | `src/the_curved_world/manifold.py` | `ClosedManifold` 基类 + 变形环面 / 变形椭球 / 双孔近似；解析一阶二阶偏导与 K |
 | `tests/test_closed_manifold.py` | 三套模型的解析偏导精度、正则性、周期环绕、高斯-博内积分与信息边界 |
-| `src/the_curved_world/maps.py` | `MapMetadata` + `MapRegistry` + `@register_map`；4 张内置地图与 `world_config_for` |
+| `src/the_curved_world/maps/`（`__init__.py` + `builtin.py`） | `MapMetadata` + `MapRegistry` + `@register_map`；4 张内置地图与 `world_config_for` |
 | `tests/test_map_registry.py` | 注册、按 id 构造、非法 id、元数据完整性、装饰器扩展 |
+| `src/the_curved_world/obstacles.py` | `Obstacle` / `ObstacleField`：两阶段散布、安全边距、周期接缝碰撞 |
+| `tests/test_obstacles.py`、`tests/test_first_person.py` | 障碍物确定性/安全边距/接缝碰撞；标架正交性与相对移动 |
+| `tests/test_obstacle_scale.py` | Task 16 放大后的障碍物尺度、四图生成成功与出生点/出口安全边距 |
 
 ## 功能状态表
 
@@ -400,6 +567,20 @@ AI Empowered/
 | 封闭曲面上帝视角（三维网格） | `server.py`、`web/app.js` | ✅ 已完成（Task 8） |
 | 地图注册表 / 工厂插件化（Task 9） | `src/the_curved_world/maps.py` | ✅ 已完成 |
 | Web 启动大厅 + 模式/种子/换图（Task 9） | `web/index.html`、`web/app.js`、`server.py` | ✅ 已完成 |
+| 第一人称切空间视角 + 视线标架（Task 10） | `gameplay.py`、`web/app.js` | ✅ 已完成（Task 15 起主视图改为二维俯视） |
+| 局部雷达小地图（无迷雾/无历史记忆）（Task 10） | `web/app.js` | ✅ 已完成（Task 15 已移除，主视图即局部地图） |
+| 两阶段障碍物生成与碰撞（Task 10） | `src/the_curved_world/obstacles.py`、`world.py` | ✅ 已完成 |
+| 无缝二维俯视切空间地图（Task 15） | `web/app.js`、`web/index.html`、`web/style.css` | ✅ 已完成 |
+| 周期相对包裹的无缝滚动（Task 15） | `web/app.js` | ✅ 已完成 |
+| 微地貌等高线 + 高程/漫反射晕渲（Task 15） | `web/app.js` | ✅ 已完成 |
+| 刚性圆盘硬碰撞 + 切向滑动（Task 15） | `web/app.js`、`src/the_curved_world/obstacles.py` | ✅ 已完成 |
+| 坡度 HUD 与上坡阻尼（Task 11/15） | `web/app.js`、`src/the_curved_world/gameplay.py` | ✅ 已完成 |
+| 60FPS 本地控制 + ~200ms 位置同步（Task 14/15） | `web/app.js`、`src/the_curved_world/server.py` | ✅ 已完成 |
+| 移除右上角雷达，主视图即局部地图（Task 15） | `web/index.html`、`web/style.css`、`web/app.js` | ✅ 已完成 |
+| 增大障碍物体积与安全边距（Task 16） | `src/the_curved_world/config.py`、`maps/builtin.py` | ✅ 已完成 |
+| 所见即所撞的 2D 障碍物像素半径（Task 16） | `web/app.js` | ✅ 已完成 |
+| 通关结算弹窗 + 自由漫游 / Cleared HUD（Task 16） | `web/index.html`、`web/app.js`、`web/style.css` | ✅ 已完成 |
+| 障碍物尺度与安全边距回归测试（Task 16） | `tests/test_obstacle_scale.py` | ✅ 已完成 |
 
 ## 安装、运行与测试
 

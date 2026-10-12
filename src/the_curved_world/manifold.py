@@ -154,6 +154,11 @@ class ClosedManifold(ABC):
     name = "closed manifold"
     genus = None
     periodic = True
+    # Orientation of the raw cross product so the reported normal points OUTWARD.
+    # ``center`` (optional) flips any residual per-point sign, which the doubly
+    # covered genus-0 chart needs.
+    outward_sign = 1.0
+    center = None
 
     @property
     def domain(self) -> Domain:
@@ -193,10 +198,20 @@ class ClosedManifold(ABC):
         return _scalarize(self.position(u, v)[..., 2])
 
     def normal(self, u, v):
+        """Unit OUTWARD normal: the up direction of the player."""
         r_u, r_v = self.first_partials(u, v)
-        cross = np.cross(r_u, r_v)
+        cross = np.cross(r_u, r_v) * self.outward_sign
         length = np.linalg.norm(cross, axis=-1, keepdims=True)
-        return cross / np.where(length > 0.0, length, 1.0)
+        if np.asarray(length).size == 1 and float(np.max(length)) < 1e-9:
+            # measure-zero degenerate chart point (the genus-0 poles): nudge and retry
+            return self.normal(u, v + 1e-4)
+        unit = cross / np.where(length > 0.0, length, 1.0)
+        if self.center is not None:
+            point = np.asarray(self.position(u, v), dtype=float)
+            offset = point - np.asarray(self.center, dtype=float)
+            flip = np.sum(unit * offset, axis=-1, keepdims=True) < 0.0
+            unit = np.where(flip, -unit, unit)
+        return unit
 
     def first_fundamental_form(self, u, v):
         r_u, r_v = self.first_partials(u, v)
@@ -312,6 +327,7 @@ class DeformedTorus(ClosedManifold):
     tube_radius: float = 7.0
     harmonics: Tuple[RadialHarmonic, ...] = ()
     name: str = "deformed torus (genus 1)"
+    outward_sign = -1.0
     genus: int = 1
 
     def __post_init__(self) -> None:
@@ -375,6 +391,7 @@ class GenusTwoApproximation(ClosedManifold):
     tube_radius: float = 5.0
     harmonics: Tuple[RadialHarmonic, ...] = ()
     name: str = "two-hole torus approximation (genus-2 look)"
+    outward_sign = -1.0
     genus: int = 2
 
     def __post_init__(self) -> None:
@@ -449,6 +466,7 @@ class DeformedEllipsoid(ClosedManifold):
     semi_z: float = 13.0
     harmonics: Tuple[RadialHarmonic, ...] = ()
     name: str = "deformed ellipsoid (genus 0)"
+    center = (0.0, 0.0, 0.0)
     genus: int = 0
 
     def __post_init__(self) -> None:
@@ -548,9 +566,11 @@ class DeformedEllipsoid(ClosedManifold):
 def default_harmonics() -> Tuple[RadialHarmonic, ...]:
     """The default smooth radius perturbation used by the torus world."""
     return (
-        RadialHarmonic(amplitude=1.4, order=2, phase=0.35, axis="u"),
-        RadialHarmonic(amplitude=1.1, order=3, phase=1.10, axis="v"),
-        RadialHarmonic(amplitude=0.7, order=4, phase=2.20, axis="u"),
+        # gently smoothed high-order perturbation: shallower, more continuous slopes
+        # macro scale: low frequency, small amplitude -> very gentle rolling ground
+        RadialHarmonic(amplitude=0.45, order=1, phase=0.35, axis="u"),
+        RadialHarmonic(amplitude=0.35, order=2, phase=1.10, axis="v"),
+        RadialHarmonic(amplitude=0.20, order=2, phase=2.20, axis="u"),
     )
 
 

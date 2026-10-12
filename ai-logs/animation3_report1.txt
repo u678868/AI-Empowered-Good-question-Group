@@ -1,0 +1,102 @@
+﻿================================================================================
+The Curved World —— Task 14 完成报告：宏观平缓流形 / 客户端物理接管 / 柔性碰撞 / 远景雾
+文件：report/animation3_report1.txt
+对应任务：process/animation3.txt
+生成日期：2026-10-12
+项目根目录：C:\Users\gzfan\Desktop\AI Empowered
+运行环境：Python 3.13.2（.venv）/ pytest 9.1.1
+================================================================================
+（本报告为追加记录；本轮按用户要求【未提交、未推送】。）
+
+一、任务目标
+--------------------------------------------------------------------------------
+1) 宏观超大平缓流形：主半径大幅放大 + 微扰降频降幅，使局部曲率极温和；
+2) 前端本地零延迟物理接管（60FPS 本地积分 + 低频状态同步）；
+3) 柔性圆形碰撞体积与连续滑动（撞树顺边滑过）；
+4) 远景空气雾效与地平线柔化；
+5) 157 项测试全绿 + 信息边界不变。
+
+二、完成的主要工作
+--------------------------------------------------------------------------------
+1) 后端宏观尺度与同步接口
+   - manifold.default_harmonics：0.95/0.75/0.45 → 0.45/0.35/0.20，阶数 2/3/4 → 1/2/2
+     （低频缓坡）；实测局部高斯曲率约 1.2e-4（严格非零但极温和）。
+   - maps/builtin：默认环面 ring_radius 45 → 130（+189%）、tube_radius 14 → 45；
+     placement 同步放大：detector_scale 24 → 60、min_separation 27 → 70、
+     obstacle_count 26 → 30、obstacle_radius 2.0 → 4.0、obstacle_safe_margin 13 → 32。
+   - gameplay：capture_radius 4.5 → 12.0（匹配更大的三维步长）；
+     新增 sync_position(u, v)：采纳客户端算出的参数坐标，服务端仍负责环绕、
+     轨迹、胜利判定（clamp/滑窗逻辑不变）。
+   - server：新增 POST /api/action/sync_position —— 接收 {u, v}，返回该点解析曲率、
+     坡度、探测器读数、视距内障碍物、相机点与胜利状态；POST /api/action/move 保持不变（完全兼容）。
+
+2) 前端客户端物理接管（web/app.js）
+   - keysDown 输入集合 + inputAxes()；帧循环内 physicsStep(dt)：
+     用补丁中心的一阶有限差分重建 r_u / r_v 与 E/F/G，把切向速度解成 (dU, dV)，
+     以 speed × dt 本地积分 (u, v)，并沿切平面推进本地相机（零网络等待、60FPS 丝滑）；
+   - 低频同步 syncPosition()：停止移动后 120ms 或移动中每 250ms 上报一次；
+     服务端回传权威状态后，本地相机以 0.35 系数缓动归位（无跳变）。
+   - resolveSoftCollisions()：每帧对视距内障碍物做球体距离判定，穿透时沿法向外推，
+     仅保留切向分量 → 撞树可顺边滑过；上坡阻力沿用服务端 last_slope 继续生效。
+   - 远景空气雾效：距视点超过 0.7 × R_view 的网格四边形颜色向淡青灰渐变
+     （rgba(150,170,185,…)），隐藏补丁边界，营造开阔草原。
+
+3) 安全边界
+   - sync_position 只返回与 move 同级的"玩家可见"信息（曲率/坡度/信号/视距内障碍物），
+     绝不包含出口坐标、真实距离或视距外障碍物。
+
+三、文件功能说明（本次涉及）
+--------------------------------------------------------------------------------
+【新增】 report/animation3_report1.txt（本报告）
+【修改】 src/the_curved_world/manifold.py    默认微扰降频降幅（宏观平缓）
+         src/the_curved_world/maps/builtin.py 默认环面 ring 130 / tube 45 与配套 placement
+         src/the_curved_world/gameplay.py     capture_radius 12.0；sync_position()
+         src/the_curved_world/server.py       POST /api/action/sync_position
+         web/app.js                           keysDown / physicsStep / localDelta /
+                                              resolveSoftCollisions / syncPosition / 远景雾
+         README.md / AI_USAGE.md              记录 Task 14
+
+四、测试结果
+--------------------------------------------------------------------------------
+汇总：157 项测试全部通过（0 失败，0 跳过）—— 与 Task 13 相同的 157 项，
+本轮为尺度与前端物理改造，未新增测试，未破坏任何既有测试。
+
+  全部模块：test_geometry(11) test_world_generation(9) test_detector(6) test_gameplay(11)
+  test_cli(13) test_render(8) test_math_audit(7) test_information_boundary(4) test_demo(4)
+  test_session(8) test_server(14) test_large_scale(10) test_closed_manifold(16)
+  test_map_registry(8) test_obstacles(8) test_first_person(9) test_slope_and_collision(10)
+  test_smoke(1) = 157 passed
+
+五、测试命令
+--------------------------------------------------------------------------------
+  .\.venv\Scripts\python.exe -m pytest                 # 全量：157 passed
+  .\.venv\Scripts\python.exe -m pytest tests/test_server.py       # 含 sync_position 路径
+  .\.venv\Scripts\python.exe -m pytest tests/test_obstacles.py    # 宏观尺度下的障碍物与安全区
+  node --check web/app.js                              # 前端语法校验
+
+六、自检结果
+--------------------------------------------------------------------------------
+  默认环面：ring_radius=130.0、tube_radius=45.0、detector_scale=60.0、obstacles=30
+  局部曲率：K 约 1.2e-4（宏观平缓，严格非零）
+  sync_position 实测：POST {u:0.1, v:-0.2} → ok、position 回显、K、视距内障碍物 19 个
+  前端：node --check 通过；keysDown/physicsStep/柔性碰撞/250ms 节流同步/远景雾 均已接入
+  信息边界：玩家状态与 sync 响应均不含 exit_position / true_distance
+
+七、已知限制（如实标注）
+--------------------------------------------------------------------------------
+1. 客户端只在补丁局部图上重建 r_u / r_v 与度量（一阶近似），长时间快速移动仍依赖
+   250ms 的服务端同步纠偏；极端网络延迟下可能出现轻微位置回拉（有缓动、无跳变）。
+2. 柔性碰撞在客户端按球体近似处理，最终权威判定仍在服务端（sync_position 会再做一次校验）。
+3. 远景雾是纯颜色混合（无体积光/真实大气散射）。
+4. 宏观尺度下 capture_radius 已同步放大到 12.0，避免单步跨过出口。
+5. 既有数学与渲染限制依旧成立（椭球两极退化、数值曲率积分、Canvas 手工透视等）。
+
+八、Git 状态（按用户要求未提交）
+--------------------------------------------------------------------------------
+  未 commit、未 push。工作区包含 Task 10 / 11 / 12 / 13 / 14 全部改动。
+  建议提交信息：
+    feat(physics): client-side 60fps smooth locomotion, macro gentle manifold and soft obstacle collision
+
+================================================================================
+报告结束
+================================================================================

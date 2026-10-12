@@ -16,6 +16,7 @@ from src.the_curved_world.config import (
 )
 from src.the_curved_world.detector import Detector, DetectorConfig
 from src.the_curved_world.geometry import SmoothSurface, ambient_distance
+from src.the_curved_world.obstacles import ObstacleField
 from src.the_curved_world.observations import PlayerObserver, PlayerView
 
 ParameterPosition = Tuple[float, float]
@@ -36,6 +37,7 @@ class WorldState:
     start: ParameterPosition
     exit: ParameterPosition
     detector: Detector
+    obstacles: ObstacleField | None = None
 
     def position(self, parameter_position: ParameterPosition) -> np.ndarray:
         """Embedded 3D position of a parameter-space location."""
@@ -143,7 +145,17 @@ class WorldGenerator:
         start = self._sample_parameter(rng)
         exit_ = self._place_exit(rng, surface, start)
         detector = Detector(surface.position(*exit_), DetectorConfig(cfg.detector_scale))
-        return WorldState(surface=surface, seed=seed, start=start, exit=exit_, detector=detector)
+        # Stage 2: obstacles are scattered *after* the smooth surface exists, and are
+        # kept clear of the start and the exit by a safe margin.
+        obstacles = ObstacleField.generate(surface, cfg, seed, exclude_points=(start, exit_))
+        return WorldState(
+            surface=surface,
+            seed=seed,
+            start=start,
+            exit=exit_,
+            detector=detector,
+            obstacles=obstacles,
+        )
 
     # -- internals ---------------------------------------------------------
 

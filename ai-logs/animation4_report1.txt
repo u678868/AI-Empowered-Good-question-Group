@@ -1,0 +1,167 @@
+================================================================================
+The Curved World — Task 15 验证报告
+文件：report/animation4_report1.txt（本报告为追加记录，不删除既有 report）
+日期：2026-10-12
+状态：本地完成；按用户要求【未 commit、未 push】
+依据：process/animation4.txt（Task 15 — Seamless 2D Tangent Top-Down View,
+      Hard Obstacle Constraint, Slope Damping & Subtle Topographic Shading）
+================================================================================
+
+一、任务目标
+--------------------------------------------------------------------------------
+1. 彻底废除第一人称伪 3D 视锥投影，主视窗回归"玩家恒定居中的纯 2D 俯视局部地图"；
+2. 用相对周期参数差渲染地物，跨周期接缝绝对不闪、不跳、不撕裂；
+3. 叠加半透明等高线 + 高程调色 + 漫反射晕渲，只暴露局部地貌、不泄露全局拓扑；
+4. 保留上坡阻尼 v_eff = v_base / (1 + k*slope^2) 与坡度 HUD；
+5. 树木/岩石改为刚性圆盘硬碰撞（沿法向截断、保留切向滑动，不渗透、不卡死）；
+6. 60 FPS requestAnimationFrame 本地控制，约 200 ms 或停止时同步给服务端；
+7. 删除右上角雷达小地图；保留底部 5 槽热栏并把特效 2D 化；
+8. 保持 /api/state/player、/api/action/move、/api/action/sync_position 兼容，
+   不向前端泄露出口坐标、真实距离或视野外障碍物；
+9. 全量后端 pytest 测试保持 100% 绿色。
+
+二、改动文件与功能
+--------------------------------------------------------------------------------
+1. web/app.js（本任务核心，重构式改动）
+   - 删除：drawFirstPerson / drawRadar / drawWorldFX / drawViewmodel /
+     resolveSoftCollisions / Pointer Lock / pitch-yaw 自由视角等第一人称代码；
+   - 新增 drawTopDownWorld()：玩家圆点 + 朝向箭头恒定居中，纯 2D 绘制；
+   - 新增 relativeDelta()：周期地图用 wrapParameter(a-b)，有界地图用线性差值；
+   - 新增 buildTerrain()/buildContours()/sampleHeight()/metricAt()：
+     局部补丁高程采样、等高线（marching squares）、高程调色、法向漫反射晕渲、局部度量换算；
+   - 新增 resolveHardCollisions()：刚性圆盘硬约束（法向截断 + 切向保留）；
+   - 新增 particle/beacon 2D 特效、罗盘扩散波纹、朝向箭头、探索迷雾与坡度 HUD；
+   - renderLoop() 每帧更新物理与画面，约 10 Hz 刷新仪表读数；
+   - 热栏 1-5：罗盘 / 曲率仪 / 测角仪 / 末影光标 / 信标。
+
+2. web/index.html
+   - 主画布 id 改为 map-canvas；删除 #radar-canvas；
+   - 标题/提示全部改为英文的 "Local Tangent Map - seamless top-down view"；
+   - 说明改为 2D 操作（WASD 跑动、鼠标瞄准、Q/E 转身、1-5 热栏、G 上帝视角）；
+   - speed 选择（1x/2x/3x）作为本地跑速倍率；
+   - 大厅文案：Player mode - seamless top-down local map。
+
+3. web/style.css
+   - 删除 .viewport .radar 雷达样式；新增 #map-canvas 十字准星光标。
+
+4. README.md
+   - 新增 "无缝二维俯视切空间地图、硬碰撞与微地貌晕渲（Task 15）" 章节；
+   - 核心文件清单 web/ 行更新为二维局部俯视地图；
+   - 功能状态表新增 Task 15 各行，并把 Task 10 第一人称/雷达行标注为
+     "Task 15 起主视图改为二维俯视 / Task 15 已移除"。
+
+5. AI_USAGE.md
+   - 交互日志新增 Task 15 行（操作、涉及文件、结果）。
+
+6. report/animation4_report1.txt
+   - 本报告。
+
+未改动：src/the_curved_world/*（服务端契约保持原样）、tests/*。
+
+三、关键实现说明
+--------------------------------------------------------------------------------
+1. 无缝周期滚动：屏幕坐标 = 中心 + wrap(u_obj - u_player) * scale。
+   可视半径 patch.radius 约 1.38（< pi），因此任何可见地物都不会落在 wrap 的
+   +/-pi 跳变点；跨越接缝时相对差值连续变化，画面无断点。
+   有界地图（planar_landscape）无周期，自动改用线性差值并做边界裁剪。
+
+2. 微地貌晕渲：服务端补丁给出局部 X/Y/z/E/F/G。前端对 z 做双线性采样与分层
+   等高线；用有限差分求法向量并与固定光照方向点乘，得到 0.62-1.00 的漫反射系数；
+   草绿按高度在深绿-黄绿之间插值，坡度越大越偏苔藓色。只显示局部切片，无法反推
+   甜甜圈/球/双孔等全局形状；上帝视角仍只在 --debug + god 模式开放。
+
+3. 坡度阻尼：slope = dz / ||dr_tangent||，k = 3（与 GameplayConfig.slope_damping
+   一致）；slope > 0 时 speed_scale = 1/(1+k*slope^2)，下坡/平地 = 1；HUD 显示
+   slope 与速度倍率。
+
+4. 硬碰撞：每个障碍物在补丁内的局部度量处把三维半径换算为参数半径
+   （max(r_world/unit, 最小像素半径)），玩家半径同样换算；每帧若候选位置进入
+   圆盘，就把位移沿碰撞法向截断到 reach，保留切向分量 → 正面被挡住，斜向顺边
+   滑开，不会渗透也不会卡死。1.01 安全系数用于吸收补丁快照的度量滞后。
+
+5. 60 FPS 与同步：requestAnimationFrame 连续积分本地 (u,v)；移动中每 ~200 ms、
+   停止后 ~120 ms 内调用 POST /api/action/sync_position；服务端返回曲率/坡度/
+   探测器读数/视距内障碍物。服务端仍用自身 move/sync_position 维护权威状态与胜利判定。
+
+四、验证与测试（含终端命令）
+--------------------------------------------------------------------------------
+1. 全量后端测试（157 项）：
+   命令：.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
+   结果：exit code 0；进度输出 72 + 72 + 13 = 157 个点全部通过；
+         包含 test_server.py::test_web_and_server_contain_no_prompt_injection
+         （web/* 与 server.py 的注入内容扫描）在内。
+
+2. 前端语法检查：
+   命令：node --check web\app.js
+   结果：exit code 0。
+
+3. 中文扫描（要求 Web UI 全英文）：
+   命令：Select-String -LiteralPath 'web\index.html','web\app.js','web\style.css'
+         -Pattern '[\u4e00-\u9fff]'
+   结果：无匹配（web/ 中无中文）。
+
+4. 残留第一人称代码扫描：
+   命令：Select-String -LiteralPath 'web\app.js' -Pattern
+         'drawFirstPerson|drawRadar|drawWorldFX|drawViewmodel|resolveSoftCollisions|fp-canvas|radar-canvas|pointerLock'
+   结果：无匹配；index.html/style.css 中亦无 radar / fp-canvas。
+
+5. 浏览器端冒烟测试（Codex 内置浏览器，本地服务
+   .\.venv\Scripts\python.exe -m src.main --serve --port 8123 --debug --map torus_genus1）：
+   a) 进入世界后 #map-canvas 正常绘制：画布裁剪区（719x539）中 51.8% 像素为绿色调，
+      中心 5x5 平均 RGB 约 (149,166,149)（玩家圆点/白环），共 284 个 16 级量化颜色
+      → 说明草地、起伏明暗与中心玩家标记均已渲染；
+   b) 浏览器控制台日志为空（无 JS 报错）；
+   c) 移动：按住 W 后 /api/state/player 的轨迹显示 u 从 1.164 → 1.206 → ... →
+      u_max 3.002，随后 wrap 到 -3.051 并继续到 -1.290（轨迹 24 点，接缝处仅一次符号翻转）
+      → 跨越周期接缝后位置、渲染与同步均连续；
+   d) 坡度 HUD：上坡奔跑时 #slope 显示 "+0.079 (x0.98, uphill)"，说明阻尼与读数生效；
+   e) 硬碰撞：对 torus_genus1 / seed 12345 中 id=9 的障碍物
+      (u=-1.82292, v=-1.63748, r=5.026) 做正面冲撞，轨迹到该障碍物的参数距离为
+      0.498 → 0.441 → 0.326 → 0.211 → 0.096 → 0.0737（= 碰撞 reach）→ 随后 0.077/0.114/...
+      说明正面被精确挡在圆盘边缘，之后沿边缘滑开继续前进；最小余量在浮点误差内约 0，
+      无任何点进入圆盘内部；
+   f) 末影光标：点击热栏 4 + 画布后 #pointers 由 3 变为 2；射击前后两帧差分在
+      画布内出现 322 个蓝色占优像素、方向角标准差约 3 度（一条同向射线），
+      符合"从玩家中心沿量化方位射出的淡出光球拖尾"；
+   g) 上帝视角：Omniscient mode + --debug 下 #god-panel 可见、
+      #mode 显示 "god view (debug)"、控制台无报错；player 模式下 /api/state/debug
+      返回 403（特权接口门禁正常）。
+
+6. 信息边界检查：
+   命令：读取 GET /api/state/player 的键集合（python urllib）
+   结果：键为 [camera_position_3d, collided, curvature, domain, elapsed_time,
+         eye_height, forward_3d, label, local_obstacles, map_id, markers, mode,
+         obstacles, patch, periodic, pointer_uses_remaining, position, position3d,
+         right_3d, seed, signal, slope, steps, trajectory, trend, up_3d, won, yaw]；
+         不含任何 exit / true_distance 字段。
+
+7. 环境清理：
+   本任务自建的 8000 与 8123 验证服务已停止；端口 8000 上仍有一个此前就存在的
+   旧服务进程（PID 38080，会话状态与本任务无关），未擅自结束，如需关闭请告知。
+
+五、安全与合规
+--------------------------------------------------------------------------------
+- 未向 web/* 或服务端写入任何 Prompt Injection 内容；注入扫描测试通过；
+- 未向前端暴露出口坐标、真实距离或视野外障碍物；上帝视角仍需 --debug 显式开启；
+- 未修改 AGENTS.md、screenshots/、demo/、submission/ 等隔离区；
+- AGENTS.md 第 5.6 条要求：第一轮之后只能推分支、由用户手动合并，本任务遵守该规则。
+
+六、已知限制与后续建议
+--------------------------------------------------------------------------------
+1. 本次由模型侧无法直接"看"截图（当前会话不支持图像输入），视觉验证是通过
+   画布像素统计 + DOM/AX 文本 + /api/state/player 轨迹联合完成的；
+   建议用户在本机打开 http://127.0.0.1:8000/（或自行启动的端口）亲自目视确认一次。
+2. requestAnimationFrame 在标签页后台会被浏览器降频，自动化按住 W 时移动会比
+   真实 60 FPS 慢；实际聚焦游玩时为 60 FPS。
+3. 硬碰撞只使用服务端下发的"视距内 obstacles"列表（信息边界要求），视野外障碍物
+   客户端本就不可见，符合安全设计；
+4. speed 选择（1x/2x/3x）现在表示本地跑速倍率，不再等同于服务端固定步长；
+5. 上帝视角绘制逻辑沿用既有实现，未做视觉重写。
+
+七、提交状态
+--------------------------------------------------------------------------------
+- 本任务全部改动均在本地工作区，未执行 git commit / git push；
+- 后续如用户授权提交，建议 commit 信息：
+  feat(view): seamless 2d top-down tangent map with hard collisions and contour shading
+- 若推送：按 AGENTS.md 第 5.6 条，先建 codex/* 分支推送，再由用户在主仓库手动合并。
+================================================================================

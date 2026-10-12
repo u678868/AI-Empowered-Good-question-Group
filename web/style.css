@@ -188,3 +188,70 @@ button.primary {
   font-weight: 600;
 }
 button.primary:hover { border-color: #6fb4ff; }
+/* -- seamless local tangent top-down map (Task 15) --------------------- */
+.viewport { position: relative; }
+.viewport #map-canvas { cursor: crosshair; }
+/* -- bottom hotbar (Task 13) ------------------------------------------- */
+.hotbar { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; gap: 8px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 14px; background: rgba(12,18,26,0.72);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); z-index: 15; }
+.hotbar .slot { position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  width: 74px; padding: 6px 4px; border-radius: 10px; border: 1px solid var(--line); background: #131c27;
+  color: var(--muted); cursor: pointer; }
+.hotbar .slot b { position: absolute; top: 2px; left: 6px; font-size: 10px; color: var(--accent); }
+.hotbar .slot i { font-style: normal; font-size: 20px; }
+.hotbar .slot span { font-size: 10px; }
+.hotbar .slot.active { border-color: var(--accent); color: var(--text); box-shadow: 0 0 0 1px var(--accent) inset; }
+/* -- larger obstacle footprint + victory modal flow (Task 16) ---------- */
+.badge.ok { color: var(--ok); }
+
+.victory-card {
+  position: relative;
+  overflow: hidden;
+  border-color: rgba(81, 207, 102, 0.45);
+}
+.victory-card h2 { color: var(--ok); position: relative; }
+.victory-card .hint { position: relative; }
+
+.victory-glow {
+  position: absolute;
+  left: -20%;
+  right: -20%;
+  top: -45%;
+  height: 240px;
+  background: radial-gradient(circle at 50% 65%, rgba(81, 207, 102, 0.38), rgba(81, 207, 102, 0) 68%);
+  animation: victory-pulse 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes victory-pulse {
+  0%, 100% { transform: scale(0.92); opacity: 0.55; }
+  50% { transform: scale(1.08); opacity: 1; }
+}
+
+.victory-summary {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+  margin: 16px 0 6px;
+  padding: 0;
+}
+.victory-summary > div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #101823;
+}
+.victory-summary dt {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.victory-summary dd { margin: 2px 0 0; color: var(--text); font-size: 15px; }
+.victory-card .modal-actions { position: relative; gap: 10px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .victory-glow { animation: none; }
+}

@@ -1,0 +1,103 @@
+﻿================================================================================
+The Curved World —— Task 13 完成报告：360° 自由视角与第一人称手持工具栏
+文件：report/animation2_report1.txt
+对应任务：process/animation2.txt
+生成日期：2026-10-12
+项目根目录：C:\Users\gzfan\Desktop\AI Empowered
+运行环境：Python 3.13.2（.venv）/ pytest 9.1.1
+================================================================================
+（本报告为追加记录；本轮按用户要求【未提交、未推送】。）
+
+一、任务目标
+--------------------------------------------------------------------------------
+1) Pointer Lock 360° 自由视角（yaw 连续旋转、pitch ±85°，视线与移动解耦）；
+2) 底部沉浸式 5 槽物品栏（1-5 / 滚轮 / 点击切换，左键使用）；
+3) 第一人称手持拟物仪器（罗盘 / 曲率仪 / 测角器 / 末影光标 / 信标）+ 摆动反馈；
+4) 世界内动态特效：飞行光球粒子与发光棱柱信标；
+5) 保持 157 项测试全绿与信息安全边界不变。
+
+二、完成的主要工作
+--------------------------------------------------------------------------------
+1) 视线管线（web/app.js）
+   - 点击画布 requestPointerLock()；document.mousemove 在锁定态用 movementX/Y
+     驱动 state.pendingYaw 与 state.pitchTarget；pitch 夹紧在 ±1.48 rad；
+   - 每 90ms 把累积的 yaw 以 action=turn 同步给服务端；RenderEngine 每帧 alpha=0.18
+     对 view.yaw / view.pitch 做插值；
+   - 投影前把相机 forward 与 up 按 pitch 绕 right 旋转：
+     forward_cam = cos(pitch)*forward_tangent + sin(pitch)*n ；
+     up_cam      = -sin(pitch)*forward_tangent + cos(pitch)*n ；
+   - 移动仍走 move_relative（切平面方向），因此抬头/低头不影响贴地行走。
+
+2) 底部物品栏（web/index.html + style.css + app.js）
+   - 5 槽 HUD（半透明毛玻璃，fixed 底部居中）：1 罗盘 / 2 曲率仪 / 3 测角仪 / 4 末影光标 / 5 信标；
+   - 数字键 1-5、鼠标滚轮、点击槽位均可切换；槽位高亮同步；
+   - 左键（锁定态）使用：slot1/2 → runTool("curvature") 等，slot4 → 生成光球并 runTool("pointer")，
+     slot5 → 生成棱柱并 runTool("mark")。
+
+3) 手持拟物模型（drawViewmodel）
+   - slot1 黄铜罗盘：表盘 + 随信号升降震颤的指针 + 外圈淡蓝微光；
+   - slot2 曲率仪：按 K 的符号显示上凸/下凹指示；
+   - slot3 测角器：三角框 + 基线；
+   - slot4 能量光球：脉冲光核；
+   - slot5 测绘短杖：杖身 + 发光头；
+   - 全部带 sin/cos 呼吸与行走摆动（bobbing）。
+
+4) 世界内特效（drawWorldFX）
+   - pointerParticles：使用 slot4 时在相机位置生成 3D 光球，沿 forward_3d 方向飞出，
+     每帧投影绘制并随生命周期淡出后消散；
+   - beacons：使用 slot5 时在脚下生成发光棱柱（自发光呼吸光效，生命周期后消散）。
+
+5) 安全边界
+   - 所有特效仅由本地已有的量化方位、俯仰与局部状态驱动；
+     服务端接口未新增任何全局/出口信息，玩家状态仍不含 exit_position 与 true_distance。
+
+三、文件功能说明（本次涉及）
+--------------------------------------------------------------------------------
+【新增】 report/animation2_report1.txt（本报告）
+【修改】 web/index.html   Pointer Lock / 360° 操作提示 + 底部 hotbar DOM
+         web/style.css    底部热栏样式（fixed 居中 / 毛玻璃 / 激活高亮）
+         web/app.js       state.pitch/slot/pendingYaw/particles/beacons；
+                          drawViewmodel / drawWorldFX / selectSlot / useSlot /
+                          spawnPointerOrb / spawnBeacon / Pointer Lock 事件 / 滚轮切换
+         README.md / AI_USAGE.md  记录 Task 13
+
+四、测试结果
+--------------------------------------------------------------------------------
+汇总：157 项测试全部通过（0 失败，0 跳过）—— 与 Task 12 相同，本轮为纯前端交互改造，
+未新增后端逻辑，未破坏任何既有测试。
+
+  全部模块：test_geometry(11) test_world_generation(9) test_detector(6) test_gameplay(11)
+  test_cli(13) test_render(8) test_math_audit(7) test_information_boundary(4) test_demo(4)
+  test_session(8) test_server(14) test_large_scale(10) test_closed_manifold(16)
+  test_map_registry(8) test_obstacles(8) test_first_person(9) test_slope_and_collision(10)
+  test_smoke(1) = 157 passed
+
+五、测试命令
+--------------------------------------------------------------------------------
+  .\.venv\Scripts\python.exe -m pytest                  # 全量：157 passed
+  node --check web/app.js                               # 前端语法校验：通过
+  （分模块命令同前几份报告）
+
+六、自检结果
+--------------------------------------------------------------------------------
+  node --check web/app.js 通过；web/ 三个文件均不含中文字符（UI 统一英文）
+  Pointer Lock / pitch 夹紧 / yaw 节流同步 / hotbar 1-5 与滚轮 / 左键使用 均已接入
+  drawViewmodel 覆盖 5 个槽位；drawWorldFX 覆盖光球粒子与信标棱柱
+  信息边界：/api/state/player 仍不含 exit_position / true_distance
+
+七、已知限制（如实标注）
+--------------------------------------------------------------------------------
+1. 手持模型与世界特效均为 Canvas 2D 程序化绘制（非真实 3D 模型 / 光照 / 阴影）。
+2. yaw 以前端预测 + 90ms 节流同步服务端，极端网络延迟下可能有轻微回拉。
+3. pitch 仅影响相机，不影响移动方向（设计如此，符合"视线与移动解耦"）。
+4. 光球与信标是纯视觉特效，不参与碰撞或探测判定。
+5. 既有数学与渲染限制依旧成立（椭球两极退化、数值曲率积分、Canvas 手工透视等）。
+
+八、Git 状态（按用户要求未提交）
+--------------------------------------------------------------------------------
+  未 commit、未 push。工作区包含 Task 10 / 11 / 12 / 13 全部改动。
+  建议提交信息：feat(interaction): 360 free mouse-look, bottom hotbar and in-hand viewmodels
+
+================================================================================
+报告结束
+================================================================================

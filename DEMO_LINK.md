@@ -10,7 +10,10 @@ python -m venv .venv
 ```
 
 The lobby lets a reviewer pick one of the four maps, a play mode
-(player / omniscient) and a seed, then enter the world.
+(player / omniscient) and a seed, then enter the world. The player view
+is a seamless 2D top-down local tangent map: the player stays pinned to
+the centre and the grassland scrolls forever with wrapped parameter
+deltas, so crossing the periodic seam never tears.
 
 ## 2. Terminal-only demo
 
@@ -23,14 +26,15 @@ The lobby lets a reviewer pick one of the four maps, a play mode
 
 1. 0:00-0:30 - open the lobby, show the four maps and their math blurbs,
    pick `Deformed Torus (genus 1)` in player mode, enter.
-2. 0:30-1:20 - walk with WASD (hold), show the fog of war filling in and the
-   metric-warped grid; take a detector reading with `Scan`.
-3. 1:20-2:00 - drop three markers and run the angle gauge; read the angle sum
-   and the Gauss-Bonnet curvature integral.
-4. 2:00-2:30 - release a pointer (limited uses) and show the tangent-plane
-   bearing plus the pitch angle.
-5. 2:30-3:00 - switch to the omniscient view (`G`) to reveal the closed surface
-   and the exit, then reopen the lobby and switch to another map.
+2. 0:30-1:20 - run with WASD (the mouse aims, Q/E turns); take a detector
+   reading with `1` (Compass) and watch the signal gauge.
+3. 1:20-2:00 - drop three markers with `5` (Beacon) and run the goniometer
+   with `3`; read the angle sum and the Gauss-Bonnet curvature integral.
+4. 2:00-2:30 - release the Eye pointer with `4` and show the quantised
+   tangent-plane bearing; run into a tree/rock to show the hard disc.
+5. 2:30-3:00 - reach the exit to show the victory modal (steps, readings,
+   markers, time, topology, seed) with Continue Free Roam / Return to
+   Lobby, then switch to the omniscient view (`G`) to reveal the surface.
 
 ## 4. Automated verification
 

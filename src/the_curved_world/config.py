@@ -177,6 +177,9 @@ class WorldConfig:
     detector_scale: float = 25.0
     randomize_surface: bool = True
     max_placement_attempts: int = 4000
+    obstacle_count: int = 12
+    obstacle_radius: float = 1.2
+    obstacle_safe_margin: float = 6.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.domain, Domain):
@@ -192,6 +195,12 @@ class WorldConfig:
         if self.boundary_margin * 2.0 >= min(self.domain.width, self.domain.height):
             raise ConfigError("WorldConfig.boundary_margin leaves no room for positions")
         _positive("WorldConfig.detector_scale", self.detector_scale)
+        if int(self.obstacle_count) < 0:
+            raise ConfigError("WorldConfig.obstacle_count must be >= 0")
+        if float(self.obstacle_radius) <= 0.0:
+            raise ConfigError("WorldConfig.obstacle_radius must be > 0")
+        if float(self.obstacle_safe_margin) < 0.0:
+            raise ConfigError("WorldConfig.obstacle_safe_margin must be >= 0")
         if self.max_placement_attempts < 1:
             raise ConfigError("WorldConfig.max_placement_attempts must be >= 1")
 

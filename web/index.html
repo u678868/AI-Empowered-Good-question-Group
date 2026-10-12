@@ -14,24 +14,26 @@
       <span id="seed">seed -</span>
       <span id="steps">steps 0</span>
       <span id="pointers">pointers -</span>
-      <span id="mode" class="badge">player view</span>
+      <span id="mode" class="badge">top-down map</span>
+      <span id="cleared" class="badge ok hidden">Cleared</span>
     </div>
     <button id="open-lobby" class="ghost">&#8635; New world / Choose map</button>
   </header>
 
   <main>
-    <section class="panel">
-      <h2>Player View - local tangent map</h2>
-      <canvas id="player-canvas" width="640" height="640"></canvas>
+    <section class="panel viewport">
+      <h2>Local Tangent Map - seamless top-down view</h2>
+      <canvas id="map-canvas" width="720" height="540"></canvas>
       <p class="hint">
-        The player is always at the centre; only a local patch of radius R is drawn and the
-        rest stays under geometric fog. The coordinate grid is warped by the local first
-        fundamental form (E, F, G) -- a hint that the world is not flat.
+        The player is pinned to the centre. The grassland scrolls forever because everything is
+        drawn from wrapped parameter deltas, so crossing the periodic seam never tears or jumps.
+        Contour lines and diffuse shading reveal gentle hills without revealing the global shape.
       </p>
       <p class="hint">
-        Move: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrow keys (hold to walk).
-        <kbd>1</kbd> ruler &middot; <kbd>2</kbd> angle gauge &middot; <kbd>3</kbd> curvature &middot;
-        <kbd>4</kbd> pointer &middot; <kbd>G</kbd> god view &middot; <kbd>Esc</kbd> close god view.
+        <kbd>W</kbd>/<kbd>A</kbd>/<kbd>S</kbd>/<kbd>D</kbd> run &middot; move the mouse over the map to aim &middot;
+        <kbd>Q</kbd>/<kbd>E</kbd> turn &middot; <kbd>1</kbd>-<kbd>5</kbd> pick a hand tool (or scroll) &middot;
+        <kbd>Space</kbd> / click uses it &middot; <kbd>G</kbd> god view (debug) &middot; <kbd>Esc</kbd> closes it.
+        Uphill ground slows you down; trees and rocks are hard, solid discs.
       </p>
     </section>
 
@@ -41,9 +43,11 @@
       <div id="detector-text" class="readout">signal -</div>
       <div class="readout">Gaussian curvature K: <span id="curvature">-</span></div>
       <div class="readout">position (u,v,z): <span id="position">-</span></div>
+      <div class="readout">heading: <span id="heading">0&deg;</span></div>
+      <div class="readout">slope: <span id="slope">-</span></div>
 
       <div class="controls">
-        <label>step
+        <label>speed
           <select id="step-size">
             <option value="1">1x</option>
             <option value="2">2x</option>
@@ -65,8 +69,10 @@
       <h2>God View <span class="badge warn">debug</span></h2>
       <canvas id="god-canvas" width="760" height="520"></canvas>
       <p class="hint">
-        Global mesh of the closed / bounded surface. Requires either the server to run with
-        <code>--debug</code> or the lobby to pick the omniscient mode. Drag to rotate.
+        Global mesh of the closed / bounded surface with the scattered obstacles and the exit.
+        Requires <code>--debug</code> or the lobby's omniscient mode. Drag to rotate.
+        This is the only privileged screen: the player view never receives exit coordinates
+        or the true distance.
       </p>
     </section>
   </main>
@@ -83,8 +89,8 @@
 
       <fieldset class="field">
         <legend>Play mode</legend>
-        <label class="radio"><input type="radio" name="mode" value="player" checked /> Player mode - explores with a local tangent view; the exit and the true distance stay hidden</label>
-        <label class="radio"><input type="radio" name="mode" value="god" /> Omniscient mode - opens the global 3D mesh and marks the exit (for demos)</label>
+        <label class="radio"><input type="radio" name="mode" value="player" checked /> Player mode - seamless top-down local map; the exit and the true distance stay hidden</label>
+        <label class="radio"><input type="radio" name="mode" value="god" /> Omniscient mode - opens the global 3D mesh, obstacles and the exit (for demos)</label>
       </fieldset>
 
       <label class="field">Random seed (leave empty for a random one)
@@ -96,6 +102,36 @@
       </div>
       <p id="lobby-error" class="message error"></p>
     </div>
+  </div>
+
+  <div id="victory-modal" class="modal hidden">
+    <div class="modal-card victory-card">
+      <div class="victory-glow" aria-hidden="true"></div>
+      <h2>Exit Found &middot; The Curved World</h2>
+      <p class="hint">
+        You reached the hidden exit of this manifold. Here is your exploration career summary:
+      </p>
+      <dl class="victory-summary">
+        <div><dt>Steps</dt><dd id="victory-steps">-</dd></div>
+        <div><dt>Detector readings</dt><dd id="victory-readings">-</dd></div>
+        <div><dt>Markers placed</dt><dd id="victory-markers">-</dd></div>
+        <div><dt>Time</dt><dd id="victory-time">-</dd></div>
+        <div><dt>Map</dt><dd id="victory-map">-</dd></div>
+        <div><dt>Topology</dt><dd id="victory-topology">-</dd></div>
+        <div><dt>Seed</dt><dd id="victory-seed">-</dd></div>
+      </dl>
+      <div class="modal-actions">
+        <button id="victory-continue" class="ghost">Continue Free Roam</button>
+        <button id="victory-lobby" class="primary">Return to Lobby</button>
+      </div>
+    </div>
+  </div>
+  <div id="hotbar" class="hotbar">
+    <button class="slot active" data-slot="1" data-tool="scan"><b>1</b><i>&#129517;</i><span>Compass</span></button>
+    <button class="slot" data-slot="2" data-tool="curvature"><b>2</b><i>&#128208;</i><span>Curvature</span></button>
+    <button class="slot" data-slot="3" data-tool="triangle"><b>3</b><i>&#128207;</i><span>Goniometer</span></button>
+    <button class="slot" data-slot="4" data-tool="pointer"><b>4</b><i>&#128302;</i><span>Eye</span></button>
+    <button class="slot" data-slot="5" data-tool="mark"><b>5</b><i>&#128681;</i><span>Beacon</span></button>
   </div>
 
   <script type="module" src="app.js"></script>
