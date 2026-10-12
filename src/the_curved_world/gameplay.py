@@ -32,6 +32,23 @@ from src.the_curved_world.world import DebugView, WorldState
 ParameterPosition = Tuple[float, float]
 
 
+def _wrap_angle(value: float) -> float:
+    """Normalise an angle to ``[-pi, pi)``."""
+    return (float(value) + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _tangent_vectors(surface, u: float, v: float):
+    """Analytic ``(r_u, r_v)`` for either a graph surface or a closed manifold."""
+    partials = getattr(surface, "first_partials", None)
+    if callable(partials):
+        r_u, r_v = partials(u, v)
+        return np.asarray(r_u, dtype=float), np.asarray(r_v, dtype=float)
+    grad_x, grad_y = surface.gradient(u, v)
+    return (
+        np.array([1.0, 0.0, float(grad_x)]),
+        np.array([0.0, 1.0, float(grad_y)]),
+    )
+
 class GameError(ValueError):
     """Raised for invalid gameplay actions (bad names, unknown markers, ...)."""
 
@@ -48,9 +65,12 @@ class GameplayConfig:
 
     move_speed: float = 1.0
     time_step: float = 0.25
-    capture_radius: float = 3.0
+    capture_radius: float = 12.0
     max_pointer_uses: int = 3
     pointer_sectors: int = 16
+    player_radius: float = 0.6
+    eye_height: float = 2.0
+    slope_damping: float = 3.0
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -65,6 +85,10 @@ class GameplayConfig:
                 "GameplayConfig.capture_radius must be >= move_speed * time_step "
                 f"({self.step_length}), got {self.capture_radius}"
             )
+        if not np.isfinite(self.eye_height) or float(self.eye_height) <= 0.0:
+            raise ConfigError("GameplayConfig.eye_height must be > 0")
+        if not np.isfinite(self.slope_damping) or float(self.slope_damping) < 0.0:
+            raise ConfigError("GameplayConfig.slope_damping must be >= 0")
         if int(self.max_pointer_uses) < 0:
             raise ConfigError("GameplayConfig.max_pointer_uses must be >= 0")
         if int(self.pointer_sectors) < 1:
@@ -105,6 +129,7 @@ class MoveResult:
     moved: bool
     clamped: bool
     won: bool
+    collided: bool = False
 
 
 @dataclass(frozen=True)
@@ -134,6 +159,10 @@ class ExplorationGame:
         self._observer: PlayerObserver = world.player_observer(observation_config)
         self._config = GameplayConfig() if gameplay_config is None else gameplay_config
         self._pointer_uses_remaining = int(self._config.max_pointer_uses)
+        self._obstacles = getattr(world, "obstacles", None)
+        self._player_radius = float(self._config.player_radius)
+        self._yaw = 0.0
+        self._last_slope = {"slope": 0.0, "speed_scale": 1.0}
         self._position: ParameterPosition = (float(world.start[0]), float(world.start[1]))
         self._steps = 0
         self._elapsed = 0.0
@@ -187,6 +216,140 @@ class ExplorationGame:
 
     # -- actions -----------------------------------------------------------
 
+    # -- first-person frame ------------------------------------------------
+
+    @property
+    def yaw(self) -> float:
+        return self._yaw
+
+    def turn(self, delta: float) -> float:
+        """Rotate the first-person heading inside the tangent plane (radians)."""
+        delta = float(delta)
+        if not math.isfinite(delta):
+            raise GameError("turn angle must be finite")
+        self._yaw = _wrap_angle(self._yaw + delta)
+        return self._yaw
+
+    def tangent_basis(self):
+        """Orthonormal tangent basis ``(t1, t2, up)`` at the current position."""
+        surface = self._player.surface
+        u, v = self._position
+        up = np.asarray(surface.normal(u, v), dtype=float)
+        r_u, r_v = _tangent_vectors(surface, u, v)
+        tangent_one = r_u - float(r_u @ up) * up
+        if float(np.linalg.norm(tangent_one)) < 1e-12:
+            tangent_one = r_v - float(r_v @ up) * up
+        tangent_one = tangent_one / float(np.linalg.norm(tangent_one))
+        tangent_two = np.cross(up, tangent_one)
+        return tangent_one, tangent_two, up
+
+    def frame(self) -> Dict[str, Tuple[float, float, float]]:
+        """First-person orthonormal frame ``{forward, right, up}`` in R^3."""
+        tangent_one, tangent_two, up = self.tangent_basis()
+        forward = math.cos(self._yaw) * tangent_one + math.sin(self._yaw) * tangent_two
+        right = np.cross(forward, up)
+        return {
+            "forward": (float(forward[0]), float(forward[1]), float(forward[2])),
+            "right": (float(right[0]), float(right[1]), float(right[2])),
+            "up": (float(up[0]), float(up[1]), float(up[2])),
+        }
+
+    def move_relative(self, direction: str, steps: int = 1) -> MoveResult:
+        """Step along the current heading.
+
+        ``direction`` is one of ``forward`` / ``backward`` / ``strafe_left`` /
+        ``strafe_right``; the heading itself is changed with :meth:`turn`.
+        """
+        frame = self.frame()
+        forward = np.asarray(frame["forward"], dtype=float)
+        right = np.asarray(frame["right"], dtype=float)
+        options = {
+            "forward": forward,
+            "backward": -forward,
+            "strafe_right": right,
+            "strafe_left": -right,
+        }
+        if direction not in options:
+            raise GameError(f"unknown direction {direction!r}")
+        target = options[direction]
+
+        surface = self._player.surface
+        u, v = self._position
+        r_u, r_v = _tangent_vectors(surface, u, v)
+        e = float(r_u @ r_u)
+        f = float(r_u @ r_v)
+        g = float(r_v @ r_v)
+        determinant = e * g - f * f
+        if determinant < 1e-12:
+            raise GameError("degenerate metric; cannot move here")
+        b1 = float(target @ r_u)
+        b2 = float(target @ r_v)
+        du = (g * b1 - f * b2) / determinant
+        dv = (e * b2 - f * b1) / determinant
+        norm = math.hypot(du, dv)
+        if norm < 1e-12:
+            return MoveResult(self._position, moved=False, clamped=False, won=self._won)
+
+        result = MoveResult(self._position, moved=False, clamped=False, won=self._won)
+        for _ in range(max(1, int(steps))):
+            result = self.move(du / norm, dv / norm)
+            if not result.moved:
+                break
+        return result
+
+    def _blocked(self, position: ParameterPosition) -> bool:
+        if self._obstacles is None:
+            return False
+        return bool(self._obstacles.check_collision(position[0], position[1], self._player_radius))
+    # -- camera / slope ----------------------------------------------------
+
+    @property
+    def eye_height(self) -> float:
+        return float(self._config.eye_height)
+
+    def camera_position(self) -> np.ndarray:
+        """First-person camera point: lifted off the surface along the normal.
+
+        ``P_camera = r(u, v) + h_eye * n(u, v)`` with ``h_eye > 0``, so the eye is
+        strictly outside the solid surface and never clips into the mesh.
+        """
+        surface = self._player.surface
+        u, v = self._position
+        point = np.asarray(surface.position(u, v), dtype=float)
+        normal = np.asarray(surface.normal(u, v), dtype=float)
+        return point + self.eye_height * normal
+
+    def project_to_tangent(self, vector) -> np.ndarray:
+        """Remove the surface-normal component (keep the player on the outer shell)."""
+        surface = self._player.surface
+        normal = np.asarray(surface.normal(*self._position), dtype=float)
+        vec = np.asarray(vector, dtype=float)
+        return vec - float(vec @ normal) * normal
+
+    def calculate_slope_penalty(self, u: float, v: float, du: float, dv: float) -> Dict[str, float]:
+        """Uphill damping for a parameter step.
+
+        ``slope = dz / ||dr_tangent||`` using the global z axis as the height
+        reference (as specified). ``speed_scale = 1 / (1 + k * slope^2)`` uphill,
+        and exactly ``1`` downhill or on the flat.
+        """
+        surface = self._player.surface
+        base = np.asarray(surface.position(u, v), dtype=float)
+        target = np.asarray(surface.position(u + du, v + dv), dtype=float)
+        delta = target - base
+        normal = np.asarray(surface.normal(u, v), dtype=float)
+        tangent = delta - float(delta @ normal) * normal
+        length = float(np.linalg.norm(tangent))
+        slope = float(delta[2] / length) if length > 1e-12 else 0.0
+        if slope > 0.0:
+            scale = 1.0 / (1.0 + float(self._config.slope_damping) * slope * slope)
+        else:
+            scale = 1.0
+        return {"slope": slope, "speed_scale": scale}
+
+    @property
+    def last_slope(self) -> Dict[str, float]:
+        return dict(self._last_slope)
     def move(self, dx: float, dy: float) -> MoveResult:
         """Move one fixed-length step in the direction ``(dx, dy)``.
 
@@ -203,14 +366,52 @@ class ExplorationGame:
             return MoveResult(self._position, moved=False, clamped=False, won=self._won)
 
         step = self._config.step_length
-        target = (self._position[0] + dx / norm * step, self._position[1] + dy / norm * step)
-        self._position, clamped = self._clamp(target)
+        unit_x, unit_y = dx / norm, dy / norm
+        # Uphill damping: the effective step shrinks as the slope steepens.
+        penalty = self.calculate_slope_penalty(self._position[0], self._position[1],
+                                               unit_x * step, unit_y * step)
+        self._last_slope = penalty
+        effective = step * float(penalty["speed_scale"])
+        if effective <= 1e-9:
+            return MoveResult(self._position, moved=False, clamped=False, won=self._won)
+        target = (self._position[0] + unit_x * effective, self._position[1] + unit_y * effective)
+        candidate, clamped = self._clamp(target)
+        if self._blocked(candidate):
+            # Tangent sliding: remove the radial penetration and keep the rest.
+            resolved = None
+            if self._obstacles is not None and hasattr(self._obstacles, "resolve_collision"):
+                resolved = self._obstacles.resolve_collision(
+                    self._position, candidate, self._player_radius
+                )
+            if resolved is not None and not self._blocked(resolved):
+                self._position = resolved
+                self._trajectory.append(self._position)
+                self._steps += 1
+                self._elapsed += self._config.time_step
+                self._update_victory()
+                return MoveResult(self._position, moved=True, clamped=clamped,
+                                  won=self._won, collided=True)
+            return MoveResult(self._position, moved=False, clamped=clamped,
+                              won=self._won, collided=True)
+        self._position = candidate
         self._trajectory.append(self._position)
         self._steps += 1
         self._elapsed += self._config.time_step
         self._update_victory()
         return MoveResult(self._position, moved=True, clamped=clamped, won=self._won)
 
+    def sync_position(self, u: float, v: float) -> MoveResult:
+        """Adopt a client-computed position (client physics, server audit).
+
+        The client integrates its own 60 fps locomotion; this entry point lets it
+        hand the resulting parameter position back. The server still owns world
+        state, collision audit and the victory decision.
+        """
+        wrapped, _ = self._clamp((float(u), float(v)))
+        self._position = wrapped
+        self._trajectory.append(self._position)
+        self._update_victory()
+        return MoveResult(self._position, moved=True, clamped=False, won=self._won)
     def read_detector(self, note: str | None = None) -> PlayerObservation:
         """Take a detector reading, append it to the log and return it."""
         observation = self._observer.observe(self._position)

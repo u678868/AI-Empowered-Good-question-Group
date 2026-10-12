@@ -1,0 +1,122 @@
+﻿================================================================================
+The Curved World —— Task 12 完成报告：渲染平滑化 / 草地着色 / 程序化低模自然物
+文件：report/animation1_report1.txt
+对应任务：process/animation1.txt
+生成日期：2026-10-12
+项目根目录：C:\Users\gzfan\Desktop\AI Empowered
+运行环境：Python 3.13.2（.venv）/ numpy 2.5.4 / matplotlib 3.11.2 / pytest 9.1.1
+================================================================================
+（本报告为追加记录，之前报告全部保留；本轮按用户要求【未提交、未推送】。）
+
+一、任务目标
+--------------------------------------------------------------------------------
+1) 60FPS + 高分屏：Canvas 物理像素绑定 dpr；常驻 requestAnimationFrame 循环 + 相机/朝向插值；
+2) 流形尺度平滑调优：主半径 +50%，平滑高阶微扰，切空间网格加密；
+3) 草地生态着色（按高度、坡度）；
+4) 程序化低模树木与岩石（画家算法深度排序），雷达按类型区分；
+5) 保持 157 项既有测试全绿与信息边界不变。
+
+二、完成的主要工作
+--------------------------------------------------------------------------------
+1) 后端尺度与生态分类
+   - obstacles.py：OBSTACLE_KINDS = ("tree", "rock")，按种子 60% 树木 / 40% 岩石（确定性）；
+     碰撞半径、安全边距、滑动算法完全不变。
+   - manifold.py：default_harmonics 振幅 1.4/1.1/0.7 → 0.95/0.75/0.45（坡度更连续温和）。
+   - maps/builtin.py：默认环面 ring_radius 30 → 45（+50%）、tube_radius 10 → 14；
+     placement 调整为 detector_scale 24、min_separation 27、obstacle_count 26、
+     obstacle_radius 2.0、obstacle_safe_margin 13.0。
+   - gameplay.py：capture_radius 3.0 → 4.5（匹配更大的三维步长）。
+   - server.py：patch_resolution 33 → 49（局部切空间视锥网格加密）。
+
+2) 前端渲染引擎（web/app.js）
+   - setupHiDPI(canvas)：canvas.width = rect.width * dpr，ctx.setTransform(dpr,...)，
+     消除高分屏模糊与边缘狗牙。
+   - RenderEngine 常驻：requestAnimationFrame 主循环 + view.cam / view.yaw，
+     alpha = 0.18 的 LERP 与最短角插值；服务端帧向量按插值后的 yaw 偏移在本地旋转。
+   - 草地着色 grassColor(height, steepness)：基底 #3d7e34 → #58a542，
+     高处泛黄、陡坡转苔藓/裸土暗绿；坡度由第一基本形式 E/G 推得（sqrt((E-1)+(G-1))）。
+   - 地形面片用草地色填充，网格线改为半透明微光（rgba(255,255,255,0.06)）。
+   - drawLowPolyTree(ctx,x,y,scale)：深褐树干矩形 + 3 层墨绿四棱锥树冠；
+     drawLowPolyRock(ctx,x,y,scale)：6 边不规则块体 + 苔绿顶面；
+     障碍物按 distance 由远及近排序绘制（画家算法），保持深度正确。
+   - 雷达：树木显示深绿点（#2f6b34）、岩石显示灰褐点（#8a8172）。
+
+3) 安全边界
+   - /api/state/player 依旧只返回视距内障碍物，不含出口坐标与真实距离；
+     插值只作用于渲染层，不改变服务端权威状态。
+
+三、文件功能说明（本次涉及）
+--------------------------------------------------------------------------------
+【新增】 report/animation1_report1.txt（本报告）
+【修改】 src/the_curved_world/obstacles.py    kind: tree | rock（60/40）
+         src/the_curved_world/manifold.py     默认微扰振幅下调（坡度更平滑）
+         src/the_curved_world/maps/builtin.py 默认环面 +50%，障碍物与探测器参数同步放大
+         src/the_curved_world/gameplay.py     capture_radius 3.0 → 4.5
+         src/the_curved_world/server.py       patch_resolution 33 → 49
+         web/app.js                           hi-dpi / 60fps 插值循环 / 草地着色 / 低模树木岩石 / 雷达配色
+         tests/test_slope_and_collision.py    障碍物滑动测试几何改为尺度无关
+         README.md / AI_USAGE.md              记录 Task 12
+
+四、测试结果
+--------------------------------------------------------------------------------
+汇总：157 项测试全部通过（0 失败，0 跳过）—— 与 Task 11 相同的 157 项，本轮为渲染/尺度优化，
+未新增测试，未破坏任何既有测试（仅更新一处尺度相关测试几何）。
+
+  模块                          用例数   结果
+  ----------------------------  ------   ------
+  test_geometry.py                11     通过
+  test_world_generation.py         9     通过
+  test_detector.py                 6     通过
+  test_gameplay.py                11     通过
+  test_cli.py                     13     通过
+  test_render.py                   8     通过
+  test_math_audit.py               7     通过
+  test_information_boundary.py     4     通过
+  test_demo.py                     4     通过
+  test_session.py                  8     通过
+  test_server.py                  14     通过
+  test_large_scale.py             10     通过
+  test_closed_manifold.py         16     通过
+  test_map_registry.py             8     通过
+  test_obstacles.py                8     通过
+  test_first_person.py             9     通过
+  test_slope_and_collision.py     10     通过
+  test_smoke.py                    1     通过
+  ----------------------------  ------   ------
+  合计                           157     全部通过
+
+五、测试命令
+--------------------------------------------------------------------------------
+  .\.venv\Scripts\python.exe -m pytest                                   # 全量：157 passed
+  .\.venv\Scripts\python.exe -m pytest tests/test_obstacles.py           # 生态分类与碰撞
+  .\.venv\Scripts\python.exe -m pytest tests/test_slope_and_collision.py # 坡度/眼高/滑动
+  .\.venv\Scripts\python.exe -m pytest tests/test_first_person.py        # 标架与相对移动
+  （其余模块命令同前：test_geometry / test_world_generation / test_detector / test_gameplay /
+    test_cli / test_render / test_math_audit / test_information_boundary / test_demo /
+    test_session / test_server / test_large_scale / test_closed_manifold / test_map_registry / test_smoke）
+
+六、自检结果
+--------------------------------------------------------------------------------
+  默认环面：ring_radius=45.0、tube_radius=14.0（+50%），微扰振幅 0.95/0.75/0.45
+  障碍物：26 个，其中 tree=15、rock=11（约 58% / 42%），起点与出口安全清空
+  局部补丁：49 x 49（原 33 x 33）；/api/state/player 约 172 KB
+  前端：node --check 通过；dpr 绑定、rAF 主循环、LERP(0.18)、草地着色、低模树/岩石、雷达配色均已接入
+  信息边界：玩家状态不含 exit_position / true_distance
+
+七、已知限制（如实标注）
+--------------------------------------------------------------------------------
+1. 第一人称仍是 Canvas 2D 手工透视（画家算法），不是 GPU 实时渲染；树/岩石是程序化低模剪影，
+   并非真实三维网格光照。
+2. 插值是纯渲染层的指数缓动（alpha=0.18），不改变服务端权威位置，也不预测未来状态。
+3. 局部补丁 49x49 使 /api/state/player 体积增至约 172 KB（本机 localhost 传输无压力）。
+4. 尺度放大后 capture_radius 相应从 3.0 调到 4.5，以保证不会被单步跨过出口。
+5. 既有数学限制依旧成立（椭球两极退化、数值曲率积分、指向器限次量化、Model C 非干净嵌入等）。
+
+八、Git 状态（按用户要求未提交）
+--------------------------------------------------------------------------------
+  未 commit、未 push。工作区包含 Task 10 / 11 / 12 全部改动。
+  建议提交信息：feat(render): 60fps interpolation, grassland shading and low-poly procedural nature
+
+================================================================================
+报告结束
+================================================================================

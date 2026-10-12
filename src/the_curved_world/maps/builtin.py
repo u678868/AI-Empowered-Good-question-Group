@@ -28,11 +28,11 @@ from src.the_curved_world.maps import (
         "integral is iint K dA = 0. Periodically wrapped, no boundary."
     ),
     topology=CLOSED_PERIODIC,
-    placement={"min_separation": 12.0, "boundary_margin": 0.0, "detector_scale": 12.0},
+    placement={"min_separation": 70.0, "boundary_margin": 0.0, "detector_scale": 60.0, "obstacle_count": 30, "obstacle_radius": 4.2, "obstacle_safe_margin": 45.0},
 )
 class TorusGenusOneMap:
     def build(self, params):
-        return DeformedTorus(ring_radius=20.0, tube_radius=7.0, harmonics=default_harmonics())
+        return DeformedTorus(ring_radius=130.0, tube_radius=45.0, harmonics=default_harmonics())
 
 
 @register_map(
@@ -43,7 +43,7 @@ class TorusGenusOneMap:
         "and the two poles are topologically unavoidable degenerate parameter points."
     ),
     topology=CLOSED_PERIODIC,
-    placement={"min_separation": 12.0, "boundary_margin": 0.0, "detector_scale": 12.0},
+    placement={"min_separation": 14.0, "boundary_margin": 0.0, "detector_scale": 13.0, "obstacle_count": 8, "obstacle_radius": 2.4, "obstacle_safe_margin": 12.0},
 )
 class EllipsoidGenusZeroMap:
     def build(self, params):
@@ -59,7 +59,7 @@ class EllipsoidGenusZeroMap:
         "need a genus-2 parameter domain."
     ),
     topology=CLOSED_PERIODIC,
-    placement={"min_separation": 8.0, "boundary_margin": 0.0, "detector_scale": 9.0},
+    placement={"min_separation": 10.0, "boundary_margin": 0.0, "detector_scale": 11.0, "obstacle_count": 16, "obstacle_radius": 4.5, "obstacle_safe_margin": 12.0},
 )
 class DoubleTorusMap:
     def build(self, params):
@@ -74,7 +74,7 @@ class DoubleTorusMap:
         "Has a boundary clamp; it is not a closed manifold."
     ),
     topology=BOUNDED_PLANE,
-    placement={"min_separation": 25.0, "boundary_margin": 3.0, "detector_scale": 25.0},
+    placement={"min_separation": 25.0, "boundary_margin": 3.0, "detector_scale": 25.0, "obstacle_count": 18, "obstacle_radius": 4.5, "obstacle_safe_margin": 16.0},
 )
 class PlanarLandscapeMap:
     def build(self, params):

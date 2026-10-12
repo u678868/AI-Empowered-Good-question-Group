@@ -1,0 +1,185 @@
+﻿================================================================================
+The Curved World —— Task 10 完成报告：第一人称流形视角 / 雷达小地图 / 障碍物碰撞
+文件：report/active3_report1.txt
+对应任务：process/active3.txt
+生成日期：2026-10-12
+项目根目录：C:\Users\gzfan\Desktop\AI Empowered
+运行环境：Python 3.13.2（.venv）/ numpy 2.5.4 / matplotlib 3.11.2 / pytest 9.1.1
+================================================================================
+（说明：本报告为追加记录，之前所有报告均保留；本轮按用户要求【未提交、未推送】。）
+
+零、本轮执行范围说明
+--------------------------------------------------------------------------------
+用户明确指示："先在本地完成功能，我没让你commit时先不要commit"。
+因此本轮所有改动都在工作区，未执行任何 git commit / git push。
+
+一、任务目标
+--------------------------------------------------------------------------------
+1) 主画布改为第一人称切空间视角（玩家站在曲面上向前看），维护 yaw 与正交视线标架；
+2) 把平面图收敛为右上角局部雷达小地图，并彻底移除全局迷雾/历史足迹记忆；
+3) 进一步放大封闭流形，并引入两阶段解耦的障碍物生成 + 碰撞系统；
+4) 更新 API 与前端 HUD；补充测试且不破坏既有测试。
+
+二、完成的主要工作
+--------------------------------------------------------------------------------
+1) 障碍物与碰撞引擎（src/the_curved_world/obstacles.py，新增）
+   - Obstacle：id / u / v / position_3d / radius / kind（boulder | rift | pillar）。
+   - ObstacleField：
+       generate(manifold, config, seed, exclude_points, safe_margin)：
+         按种子确定性散布；避开起点/出口（环境距离安全边距）；障碍物之间也保持间距；
+       check_collision(u, v, player_radius)：用环境三维距离判定 —— 该度量天然处理周期接缝；
+       blocking_obstacle / obstacles_near / distance_to / to_list；
+   - periodic_parameter_distance()：环面参数空间最短距离辅助函数。
+   - 两阶段解耦：底层曲面先生成，障碍物随后独立散布；生成器不修改曲面。
+
+2) 世界与配置（world.py / config.py）
+   - WorldConfig 新增 obstacle_count / obstacle_radius / obstacle_safe_margin（含校验）。
+   - WorldState 新增 obstacles 字段（带默认值，保持既有构造兼容）。
+   - WorldGenerator.generate()：先生成曲面 → 再生成障碍物 → 组成 WorldState。
+   - 地图注册表 world_config_for() 支持从 placement 读取障碍物参数。
+   - 尺度放大：默认环面 ring_radius 20 → 30、tube_radius 7 → 10；
+     detector_scale 12 → 16、min_separation 12 → 18；障碍物 22 个 / 半径 1.6 / 安全边距 9.0。
+     四张地图各自配置障碍物数量与安全边距。
+
+3) 第一人称标架与移动（gameplay.py）
+   - 新增 yaw（初始 0）与 turn(delta)（角度归一化到 [-pi, pi)）；
+   - tangent_basis()：以曲面法向为 up，构造切平面正交基 (t1, t2)；
+   - frame()：返回正交标架 {forward, right, up}（forward 由 yaw 在切平面内旋转得到）；
+   - move_relative(direction, steps)：forward / backward / strafe_left / strafe_right，
+     把目标切向量解析地展开到 (r_u, r_v) 基（用第一基本形式求解），再按参数步长推进；
+   - 碰撞：move() 若新坐标被障碍物阻挡，则阻止穿透并尝试沿参数轴滑动，
+     返回 MoveResult.collided=True；完全不撞时行为与之前一致。
+
+4) 服务端 API（server.py）
+   - POST /api/action/move 支持 {"action":"step","direction":...,"steps":n} 与
+     {"action":"turn","angle":d}；旧的 {dx,dy} 仍兼容。
+   - GET /api/state/player 新增：yaw、forward_3d / right_3d / up_3d、
+     patch.X / patch.Y（三维坐标网格）、patch.vision_radius、obstacles（仅视距内）。
+   - GET /api/state/debug 新增全部障碍物（供全知视角渲染）。
+   - 信息边界：玩家端只返回渲染补丁范围内（vision_radius 内）的障碍物，
+     绝不返回远端障碍物、出口坐标或真实距离。
+
+5) Web 前端（web/index.html / web/app.js / web/style.css）
+   - 主画布改为第一人称透视：把补丁三维网格点变换到相机标架 (right, up, forward)，
+     透视投影后按深度做画家算法绘制，远处按距离淡出；视锥外的地形不绘制。
+   - 障碍物以线框圆 + 十字 + 名称/距离标注（只画服务器给出的视距内障碍物）。
+   - 右上角局部雷达小地图：圆形 HUD，只画以玩家为中心、固定小半径 R_radar
+     的即时切片 + 障碍物红点 + 附近标记点；随 yaw 旋转（朝向朝上）。
+   - 移除全局迷雾与历史足迹：不再维护探索位图、不再绘制轨迹。
+   - 键盘：W/S（↑/↓）前进后退（可按住连续走）；A/D（←/→）转向；鼠标拖拽主视窗转向。
+   - 上帝视角保留，并额外渲染曲面上散落的障碍物点阵与出口。
+
+三、文件功能说明（本次涉及）
+--------------------------------------------------------------------------------
+【新增】
+  src/the_curved_world/obstacles.py   Obstacle / ObstacleField / periodic_parameter_distance
+  tests/test_obstacles.py             两阶段与确定性、安全边距、周期接缝碰撞、配置校验（8 项）
+  tests/test_first_person.py          标架正交性、法向=up、转向、相对移动、碰撞阻挡（9 项）
+
+【修改】
+  src/the_curved_world/config.py      WorldConfig 障碍物参数与校验
+  src/the_curved_world/world.py       WorldState.obstacles；两阶段生成
+  src/the_curved_world/gameplay.py    yaw / turn / tangent_basis / frame / move_relative /
+                                      player_radius / 碰撞阻断与滑动；MoveResult.collided
+  src/the_curved_world/server.py      action=step/turn；frame 向量、yaw、视距内障碍物、
+                                      三维补丁网格；debug 输出全部障碍物
+  src/the_curved_world/maps/*.py      障碍物参数进入 placement；默认环面放大
+  web/index.html                     第一人称画布 + 右上角雷达 + 控制提示
+  web/app.js                         第一人称透视渲染器 + 雷达；移除迷雾/足迹；W/S/A/D 重定义
+  web/style.css                      雷达 HUD 样式
+  tests/test_session.py              使胜利路线对新尺寸与障碍物更稳健
+  README.md / AI_USAGE.md            记录 Task 10
+四、测试结果
+--------------------------------------------------------------------------------
+汇总：147 项测试全部通过（0 失败，0 跳过）—— 既有 130 项保持全绿，新增 17 项。
+
+  模块                          用例数   结果
+  ----------------------------  ------   ------
+  test_geometry.py                11     通过
+  test_world_generation.py         9     通过
+  test_detector.py                 6     通过
+  test_gameplay.py                11     通过
+  test_cli.py                     13     通过
+  test_render.py                   8     通过
+  test_math_audit.py               7     通过
+  test_information_boundary.py     4     通过
+  test_demo.py                     4     通过
+  test_session.py                  8     通过
+  test_server.py                  14     通过
+  test_large_scale.py             10     通过
+  test_closed_manifold.py         16     通过
+  test_map_registry.py             8     通过
+  test_obstacles.py                8     通过   （本轮新增）
+  test_first_person.py             9     通过   （本轮新增）
+  test_smoke.py                    1     通过
+  ----------------------------  ------   ------
+  合计                           147     全部通过
+
+五、每项测试的终端命令
+--------------------------------------------------------------------------------
+（在项目根目录 C:\Users\gzfan\Desktop\AI Empowered 下执行）
+
+【全量测试】
+  .\.venv\Scripts\python.exe -m pytest
+  预期输出：147 passed
+
+【本轮新增模块】
+  .\.venv\Scripts\python.exe -m pytest tests/test_obstacles.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_first_person.py
+
+【其余模块】
+  .\.venv\Scripts\python.exe -m pytest tests/test_geometry.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_world_generation.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_detector.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_gameplay.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_cli.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_render.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_math_audit.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_information_boundary.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_demo.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_session.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_server.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_large_scale.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_closed_manifold.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_map_registry.py
+  .\.venv\Scripts\python.exe -m pytest tests/test_smoke.py
+
+六、功能自检结果（本地 http://127.0.0.1）
+--------------------------------------------------------------------------------
+  第一人称状态：yaw=0.000，forward/right/up 均在，视野内障碍物 11 个，vision_radius=46.6
+  补丁三维网格：X / Y / z 均在
+  泄露检查：玩家状态不含 exit_position、不含 true_distance
+  action=step forward x3 → moved=True collided=False
+  action=turn 0.7 → yaw=0.700（纯转向不移动）
+  action=step strafe_right x2 → 正常
+  随机漫游 120 次（每次 3 步）：观测到 53 次 blocked by obstacle → 碰撞系统有效
+  视野内障碍物仍受限：15 <= 总数 22
+  障碍物安全边距：起点/出口在四张地图上均无碰撞
+  标架正交性：|f|=|r|=|u|=1，f.u / r.u / f.r 均约在 1e-9 以内
+  周期接缝碰撞：跨越 v=±pi 的相邻点可被正确判定为碰撞
+
+七、已知限制（如实标注）
+--------------------------------------------------------------------------------
+1. 第一人称前端是 Canvas 2D 手工透视投影（画家算法、无光照/遮挡剔除），
+   不是 GPU 实时渲染；patch 33x33 时 /api/state/player 约 80 KB。
+2. 雷达 R_radar 为补丁半径的 0.55 倍；雷达与视野都只画服务器给出的视距内障碍物，
+   这是信息边界的一部分，不是渲染遗漏。
+3. "移动"仍在参数空间按固定参数步长推进（不是三维等速），
+   朝向只决定参数空间中的前进方向。
+4. 障碍物在流形上是"点半径"体积（球体近似），不是真正的网格几何实体。
+5. 既有数学限制依旧成立（椭球两极退化、曲率积分为数值积分、指向器限次量化等）。
+
+八、Git 状态（按用户要求未提交）
+--------------------------------------------------------------------------------
+  未 commit、未 push。工作区改动：
+    M  AGENTS.md / .gitignore / Makefile / README.md / AI_USAGE.md / web/*
+    D  src/the_curved_world/maps.py
+    ?? src/the_curved_world/obstacles.py
+    ?? src/the_curved_world/maps/  docs/contributing_extensions.md  scripts/
+    ?? tests/test_obstacles.py  tests/test_first_person.py
+  待用户确认后再按原子化规范提交（建议信息：
+    feat(gameplay): first-person manifold projection, radar minimap and obstacle collisions）
+
+================================================================================
+报告结束
+================================================================================

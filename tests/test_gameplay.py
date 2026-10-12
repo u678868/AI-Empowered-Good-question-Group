@@ -27,7 +27,7 @@ def make_game(world: WorldState, **cfg) -> ExplorationGame:
 
 def test_move_updates_position_and_recomputes_height() -> None:
     world = make_world((0.0, 0.0), (2.5, 2.5))
-    game = make_game(world)
+    game = make_game(world, slope_damping=0.0)   # isolate geometry from the slope penalty
     result = game.move(1.0, 0.0)
 
     assert result.moved
@@ -40,7 +40,7 @@ def test_move_updates_position_and_recomputes_height() -> None:
 
 def test_diagonal_movement_is_normalised() -> None:
     world = make_world((0.0, 0.0), (2.5, 2.5))
-    game = make_game(world)
+    game = make_game(world, slope_damping=0.0)   # isolate geometry from the slope penalty
     start = game.position
     game.move(1.0, 1.0)
     dx = game.position[0] - start[0]

@@ -172,6 +172,9 @@ def world_config_for(map_id: str = DEFAULT_MAP_ID) -> WorldConfig:
         min_separation=float(placement.get("min_separation", 12.0)),
         boundary_margin=float(placement.get("boundary_margin", 0.0)),
         detector_scale=float(placement.get("detector_scale", 12.0)),
+        obstacle_count=int(placement.get("obstacle_count", 12)),
+        obstacle_radius=float(placement.get("obstacle_radius", 1.2)),
+        obstacle_safe_margin=float(placement.get("obstacle_safe_margin", 6.0)),
     )
 
 

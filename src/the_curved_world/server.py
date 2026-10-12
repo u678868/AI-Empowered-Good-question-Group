@@ -61,7 +61,7 @@ class GameSession:
         mode: Optional[str] = None,
         debug: bool = False,
         patch_radius: Optional[float] = None,
-        patch_resolution: int = 33,
+        patch_resolution: int = 49,
         debug_resolution: int = 61,
     ) -> None:
         self.startup_debug = bool(debug)
@@ -73,6 +73,7 @@ class GameSession:
             self.map_id = map_id or map_id_for(world_config)
         self.mode = mode if mode in ("player", "god") else ("god" if debug else "player")
         self.debug = self.startup_debug
+        self._last_collided = False
         self.gameplay_config = GameplayConfig() if gameplay_config is None else gameplay_config
         self.observation_config = ObservationConfig() if observation_config is None else observation_config
         self.patch_radius = None if patch_radius is None else float(patch_radius)
@@ -157,9 +158,13 @@ class GameSession:
         xs = np.linspace(x - radius, x + radius, count)
         ys = np.linspace(y - radius, y + radius, count)
         grid_x, grid_y = np.meshgrid(xs, ys)
-        # z is the third embedded coordinate (height for a graph, 3D z for a manifold)
-        grid_z = np.asarray(surface.position(grid_x, grid_y), dtype=float)[..., 2]
+        # Full embedded coordinates are needed for the first-person projection;
+        # z alone (the graph-surface analogue) is not enough on a manifold.
+        points = np.asarray(surface.position(grid_x, grid_y), dtype=float)
+        grid_x3, grid_y3, grid_z = points[..., 0], points[..., 1], points[..., 2]
         grid_e, grid_f, grid_g = surface.first_fundamental_form(grid_x, grid_y)
+        player_point = np.asarray(surface.position(x, y), dtype=float)
+        vision_radius = float(np.max(np.linalg.norm(points - player_point, axis=-1)))
 
         def rows(grid):
             return [[_round(v) for v in row] for row in grid]
@@ -168,11 +173,30 @@ class GameSession:
             "x": [_round(v) for v in xs],
             "y": [_round(v) for v in ys],
             "radius": _round(radius),
+            "vision_radius": _round(vision_radius),
+            "X": rows(grid_x3),
+            "Y": rows(grid_y3),
             "z": rows(grid_z),
             "E": rows(grid_e),
             "F": rows(grid_f),
             "G": rows(grid_g),
         }
+    def _visible_obstacles(self, patch: Dict[str, Any], position) -> List[Dict[str, Any]]:
+        """Obstacles inside the rendered patch only -- far ones are never sent."""
+        field = getattr(self._game, "_obstacles", None)
+        if field is None or len(field) == 0:
+            return []
+        radius = float(patch.get("vision_radius", 0.0))
+        point = np.asarray(self._game.player_view.position(position), dtype=float)
+        visible: List[Dict[str, Any]] = []
+        for obstacle in field.obstacles:
+            delta = np.asarray(obstacle.position_3d, dtype=float) - point
+            distance = float(np.linalg.norm(delta))
+            if distance > radius:
+                continue
+            visible.append({**obstacle.to_dict(), "distance": _round(distance)})
+        visible.sort(key=lambda entry: entry["distance"])
+        return visible
     # -- player-facing state ----------------------------------------------
 
     def player_state(self) -> Dict[str, Any]:
@@ -180,6 +204,8 @@ class GameSession:
         game = self._game
         position = game.position
         position3d = game.player_view.position(position)
+        patch = self._surface_patch(position)
+        local_obstacles = self._visible_obstacles(patch, position)
         return {
             "seed": game.summary().seed,
             "periodic": bool(getattr(game.player_view.surface, "periodic", False)),
@@ -189,7 +215,13 @@ class GameSession:
             "position": [_round(position[0]), _round(position[1])],
             "position3d": [_round(v) for v in position3d],
             "curvature": _round(game.curvature(), 8),
-            "patch": self._surface_patch(position),
+            "patch": patch,
+            "obstacles": local_obstacles,
+            "local_obstacles": local_obstacles,
+            "camera_position_3d": [_round(v) for v in game.camera_position()],
+            "eye_height": _round(game.eye_height),
+            "slope": {key: _round(value, 6) for key, value in game.last_slope.items()},
+            "collided": bool(self._last_collided),
             "trajectory": [[_round(px), _round(py)] for px, py in game.trajectory],
             "markers": [
                 {
@@ -202,6 +234,10 @@ class GameSession:
             ],
             "steps": game.steps,
             "pointer_uses_remaining": game.pointer_uses_remaining,
+            "yaw": _round(game.yaw, 6),
+            "forward_3d": [_round(v) for v in game.frame()["forward"]],
+            "right_3d": [_round(v) for v in game.frame()["right"]],
+            "up_3d": [_round(v) for v in game.frame()["up"]],
             "elapsed_time": _round(game.elapsed_time),
             "won": bool(game.won),
             **self._observation_payload(),
@@ -252,6 +288,7 @@ class GameSession:
             "domain": self._domain_payload(),
             "periodic": bool(getattr(surface, "periodic", False)),
             "surface": {"x": rows(grid_x), "y": rows(grid_y), "z": rows(grid_z)},
+            "obstacles": (self._game._obstacles.to_list() if getattr(self._game, "_obstacles", None) is not None else []),
             "surface_config": model,
             "start_position": [_round(v) for v in developer.start_position()],
             "exit_position": [_round(v) for v in developer.exit_position()],
@@ -261,17 +298,8 @@ class GameSession:
 
     # -- actions -----------------------------------------------------------
 
-    def move(self, dx: float, dy: float, steps: int = 1) -> Dict[str, Any]:
-        try:
-            count = int(steps)
-        except (TypeError, ValueError):
-            raise GameError(f"steps must be an integer, got {steps!r}")
-        count = max(1, min(10, count))
-        result = self._game.move(float(dx), float(dy))
-        for _ in range(count - 1):
-            if not result.moved:
-                break
-            result = self._game.move(float(dx), float(dy))
+    def _move_payload(self, result) -> Dict[str, Any]:
+        self._last_collided = bool(getattr(result, "collided", False))
         position3d = self._game.player_view.position(result.position)
         return {
             "ok": True,
@@ -279,11 +307,87 @@ class GameSession:
             "position3d": [_round(v) for v in position3d],
             "moved": bool(result.moved),
             "clamped": bool(result.clamped),
+            "collided": bool(getattr(result, "collided", False)),
             "won": bool(result.won),
             "steps": self._game.steps,
+            "yaw": _round(self._game.yaw, 6),
             **self._observation_payload(),
         }
 
+    @staticmethod
+    def _step_count(steps) -> int:
+        try:
+            count = int(steps)
+        except (TypeError, ValueError):
+            raise GameError(f"steps must be an integer, got {steps!r}")
+        return max(1, min(10, count))
+
+    def move(self, dx: float, dy: float, steps: int = 1) -> Dict[str, Any]:
+        """Legacy parameter-space move (kept for compatibility)."""
+        count = self._step_count(steps)
+        result = self._game.move(float(dx), float(dy))
+        for _ in range(count - 1):
+            if not result.moved:
+                break
+            result = self._game.move(float(dx), float(dy))
+        return self._move_payload(result)
+
+    def sync_position(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Low-frequency client sync: adopt the local (u, v) and answer with world facts."""
+        u = payload.get("u")
+        v = payload.get("v")
+        if u is None or v is None:
+            raise GameError("sync_position requires u and v")
+        try:
+            result = self._game.sync_position(float(u), float(v))
+        except (TypeError, ValueError) as exc:
+            raise GameError(f"u and v must be numbers: {exc}") from exc
+        patch = self._surface_patch(result.position)
+        position3d = self._game.player_view.position(result.position)
+        return {
+            "ok": True,
+            "position": [_round(result.position[0]), _round(result.position[1])],
+            "position3d": [_round(value) for value in position3d],
+            "camera_position_3d": [_round(value) for value in self._game.camera_position()],
+            "won": bool(result.won),
+            "steps": self._game.steps,
+            "curvature": _round(self._game.curvature(), 8),
+            "slope": {key: _round(value, 6) for key, value in self._game.last_slope.items()},
+            "patch": patch,
+            "obstacles": self._visible_obstacles(patch, result.position),
+            **self._observation_payload(),
+        }
+    def step_action(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """First-person action: turn the view and/or step along the heading.
+
+        Body: ``{"action": "step", "direction": "forward", "angle": 0.1, "steps": 1}``.
+        ``direction`` is optional, so a pure rotation is allowed.
+        """
+        angle = payload.get("angle")
+        if angle is not None:
+            try:
+                self._game.turn(float(angle))
+            except (TypeError, ValueError) as exc:
+                raise GameError(f"angle must be a number, got {angle!r}") from exc
+
+        direction = payload.get("direction")
+        if not direction:
+            position3d = self._game.player_view.position(self._game.position)
+            return {
+                "ok": True,
+                "moved": False,
+                "clamped": False,
+                "collided": False,
+                "won": bool(self._game.won),
+                "steps": self._game.steps,
+                "yaw": _round(self._game.yaw, 6),
+                "position": [_round(self._game.position[0]), _round(self._game.position[1])],
+                "position3d": [_round(v) for v in position3d],
+                **self._observation_payload(),
+            }
+
+        count = self._step_count(payload.get("steps", 1))
+        return self._move_payload(self._game.move_relative(str(direction), count))
     def tool(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         tool = str(payload.get("tool", "")).strip().lower()
         game = self._game
@@ -427,13 +531,19 @@ class CurvedWorldHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             payload = self._read_json()
+            if path == "/api/action/sync_position":
+                self._send_json(200, self.session.sync_position(payload))
+                return
             if path == "/api/session/new":
                 self._send_json(200, self.session.reset_world(
                     payload.get("map_id"), payload.get("seed"), payload.get("mode")
                 ))
                 return
             if path == "/api/action/move":
-                self._send_json(200, self.session.move(payload.get("dx", 0.0), payload.get("dy", 0.0), payload.get("steps", 1)))
+                if payload.get("action") == "step" or "direction" in payload or "angle" in payload:
+                    self._send_json(200, self.session.step_action(payload))
+                else:
+                    self._send_json(200, self.session.move(payload.get("dx", 0.0), payload.get("dy", 0.0), payload.get("steps", 1)))
                 return
             if path == "/api/action/tool":
                 self._send_json(200, self.session.tool(payload))

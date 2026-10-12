@@ -1,0 +1,205 @@
+================================================================================
+The Curved World — Task 16 报告
+（Plugin3：增大障碍物体积 / 通关结算弹窗 / 提交封装与分支推送）
+文件：report/plugin3_report1.txt
+日期：2026-10-12
+基线：origin/main = fd07709（首轮提交，共 58 个文件）
+================================================================================
+
+一、结论摘要
+--------------------------------------------------------------------------------
+1. 功能完成：障碍物体积按地图尺度放大；新增通关结算弹窗（Continue Free Roam /
+   Return to Lobby + 顶部 Cleared 徽章）；前端障碍物绘制半径与硬碰撞圆盘严格一致。
+2. 测试：pytest 全量 159 项通过（原 157 项 + 新增 2 项障碍物尺度测试）；
+   node --check web/app.js 通过；web/ 无中文字符；浏览器控制台无报错。
+3. 封装：scripts/package_submission.py 新增 --output 参数，本轮输出到
+   temp/task16_package/（70 个文件）与 temp/task16_package.zip。
+   注意：AGENTS.md 第 2 节把 submission/ 划为 STRICT READ-ONLY，Codex 不得写入，
+   因此本轮不写 submission/，改为写入 temp/ 暂存目录；其目录结构与 submission/
+   完全一致，可由用户手动整体替换（或授权后替换）。
+4. Git：按 AGENTS.md 第 5.6 节提交到 codex/* 分支并推送该分支；
+   不推送 main，合并由用户本人在 GitHub 手动完成（不做 --force）。
+
+二、Task 16 功能改动
+--------------------------------------------------------------------------------
+1) 障碍物尺度（src/the_curved_world/config.py、maps/builtin.py）
+
+   | 配置 | 障碍数量 | 半径 原 -> 新 | 安全边距 原 -> 新 |
+   | :--- | :--- | :--- | :--- |
+   | WorldConfig 默认值 | 12 | 1.2 -> 3.5 | 6.0 -> 12.0 |
+   | torus_genus1 | 30 | 4.0 -> 4.2 | 32 -> 45 |
+   | ellipsoid_genus0 | 12 -> 8 | 1.3 -> 2.4 | 7 -> 12 |
+   | double_torus | 16 | 1.3 -> 4.5 | 7 -> 12 |
+   | planar_landscape | 18 | 1.8 -> 4.5 | 8 -> 16 |
+
+   说明：环面地图半径受"障碍物互不重叠（间距 2.5 * 基础半径）+ 30 个障碍物"与
+   测试所用小环面 default_manifold 的容量共同约束，因此环面采用 4.2 并同时提高
+   前端最小像素半径来保证视觉存在感；其余三张地图半径提升约 1.8x ~ 3.5x。
+   已用 seeds 0..3 验证四张地图均能生成满额障碍物，且每个障碍物到出生点/出口的
+   环境三维距离 >= obstacle_safe_margin。
+
+2) 前端"所见即所撞"（web/app.js）
+
+   - MIN_OBSTACLE_PX 7 -> 12、MIN_PLAYER_PX 2.5 -> 4；
+   - 障碍物半径按其**所在位置**的局部度量（双线性插值的 E/G）换算为参数半径，
+     绘制半径与硬碰撞圆盘使用同一个 obstacleParam，不再出现"画得比撞得大/小"；
+   - 玩家圆点外新增碰撞体半径环，接触障碍物时可直接看到"身体贴边"。
+
+3) 通关结算弹窗与流转（web/index.html、web/style.css、web/app.js）
+
+   - 新增 #victory-modal：毛玻璃卡片 + 轻量庆祝微光动画（victory-pulse）；
+   - 摘要字段：#victory-steps（步数）、#victory-readings（探测器读数次数）、
+     #victory-markers（标记数）、#victory-time（本次进入世界后的耗时 mm:ss）、
+     #victory-map（地图名）、#victory-topology（拓扑）、#victory-seed（种子）；
+   - 触发：服务端 /api/state/player 或 sync_position 返回 won: true 时，
+     applySnapshot() -> maybeShowVictory() 只弹出一次；
+   - Continue Free Roam：关闭弹窗、顶部 #cleared 徽章显示 "Cleared"，
+     玩家可继续在当前曲面测量/自由漫游；
+   - Return to Lobby：关闭弹窗并重新呼出 #lobby-modal 启动大厅；
+   - 新增 UI 文案全部为英文，避免编码乱码与中文字符测试报警。
+
+4) 新增测试与打包工具
+
+   - tests/test_obstacle_scale.py：固定 Task 16 的四图障碍物半径与安全边距，
+     并验证多随机种子下仍能满额生成且出生点/出口安全距离成立；
+   - scripts/package_submission.py：新增 --output（默认仍为 submission/），
+     可把 src/、web/、tests/、docs/、README.md、AI_USAGE.md、ai-logs/、
+     screenshots/、DEMO_LINK.md 等打包到指定暂存目录；DEMO_LINK.md 文案刷新为
+     当前 2D 俯视玩法 + Task 16 演示脚本。
+
+三、测试命令与结果
+--------------------------------------------------------------------------------
+1. 全量后端测试（159 项）：
+   命令：.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
+   结果：exit code 0；进度输出 72 + 72 + 15 = 159 个点全部通过
+         （含新增 tests/test_obstacle_scale.py 的 2 项）。
+
+2. 前端语法：
+   命令：node --check web\app.js       结果：exit code 0
+
+3. 中文扫描（Web UI 必须全英文）：
+   命令：Select-String -LiteralPath 'web\index.html','web\app.js','web\style.css'
+         -Pattern '[\u4e00-\u9fff]'
+   结果：无匹配
+
+4. 浏览器自测（本地服务：
+   .\.venv\Scripts\python.exe -m src.main --serve --port 8123 --debug）：
+   a) 服务端把玩家 sync_position 到 torus_genus1 / seed 12345 的出口
+      (u=1.8684, v=1.1074) 后，/api/state/player 返回 won=true；
+   b) 前端加载后 #victory-modal 可见，摘要实际值：
+      steps=0、readings=0、markers=0、time=00:00、
+      map=Deformed Torus (genus 1)、topology=closed periodic manifold、seed=12345；
+   c) 点击 Continue Free Roam：#victory-modal 变为 hidden、#cleared=badge ok；
+   d) 重新注入胜利后点击 Return to Lobby：#victory-modal 变为 hidden、
+      #lobby-modal 恢复为 modal；
+   e) 两次浏览器测试 dev.logs 均为空（无 JS 报错）。
+   说明：为了无需真实走完整个流形即可验证弹窗，自测时通过服务端 sync_position
+   直接注入出口参数；正式游玩仍由真实移动触发 won。
+
+5. 障碍物视觉自测：
+   同一 torus_genus1 视野内，障碍物绘制半径由原先的
+   max(r/unit*scale, 7/300*viewRadius*scale) 提升为
+   max(r/unit*scale, 12/300*viewRadius*scale)；
+   平面地图半径 1.8 -> 4.5，俯视树冠/岩石明显变大（约 2.5x 半径）。
+
+四、之前 commit 过的目录：本轮差异标注（用户要求）
+--------------------------------------------------------------------------------
+比较方式：
+  origin/main（fd07709，首轮提交，58 个文件）
+  vs temp/task16_package/（本轮封装暂存，70 个文件，结构完全对齐仓库根目录）
+统计：新增 12 / 修改 21 / 删除 0 / 未变 37（目录结构保持不变）
+
+4.1 已修改文件（21 个）
+--------------------------------------------------------------------------------
+| # | 文件 | 本轮/累积改动说明 |
+| :--- | :--- | :--- |
+| 1 | `.gitignore` | 增加 temp/、submission/、submission.zip、process/、report/ 等忽略项 |
+| 2 | `AI_USAGE.md` | 追加 Task 15、Task 16 交互记录 |
+| 3 | `DEMO_LINK.md` | 打包脚本重写：改为 2D 俯视玩法 + Task 16 演示/验证步骤 |
+| 4 | `README.md` | 新增 Task 15/16 章节，功能状态表与核心文件清单同步 |
+| 5 | `requirements.txt` | 依赖声明随 Task 1-16 累积调整 |
+| 6 | `screenshots/01_local_tangent_view.png` | 由打包脚本重新渲染（二进制变化） |
+| 7 | `screenshots/02_omniscient_3d_view.png` | 由打包脚本重新渲染（二进制变化） |
+| 8 | `screenshots/03_map_gallery.png` | 由打包脚本重新渲染（二进制变化） |
+| 9 | `screenshots/README.md` | 打包脚本重写的说明文本 |
+| 10 | `src/the_curved_world/config.py` | Task 16：默认 obstacle_radius 1.2->3.5、safe_margin 6->12 |
+| 11 | `src/the_curved_world/gameplay.py` | Task 11/14：坡度阻尼、相机抬升、相对移动、sync_position |
+| 12 | `src/the_curved_world/manifold.py` | Task 11/12：向外法向、宏观尺度与微扰调整 |
+| 13 | `src/the_curved_world/maps/__init__.py` | Task 9：地图注册表（替代首轮 maps.py 的实现） |
+| 14 | `src/the_curved_world/maps/builtin.py` | Task 12/16：默认地图尺度与障碍物参数放大 |
+| 15 | `src/the_curved_world/server.py` | Task 10-14：obstacles / patch / sync_position / debug 接口扩展 |
+| 16 | `src/the_curved_world/world.py` | Task 10/12：障碍物接入世界生成、默认地图切换 |
+| 17 | `tests/test_gameplay.py` | 随 gameplay 变更同步断言 |
+| 18 | `tests/test_session.py` | 随 session/cli 变更同步断言 |
+| 19 | `web/app.js` | Task 15/16：2D 俯视重构、障碍物像素半径、通关弹窗逻辑 |
+| 20 | `web/index.html` | Task 15/16：移除雷达、新增 victory modal / Cleared 徽章、英文文案 |
+| 21 | `web/style.css` | Task 15/16：移除雷达样式、新增 victory 弹窗样式 |
+
+4.2 新增文件（11 个）
+--------------------------------------------------------------------------------
+| 文件 | 说明 |
+| :--- | :--- |
+| `ai-logs/active3_report1.txt` | Task active3 报告 |
+| `ai-logs/active4_report1.txt` | Task active4 报告 |
+| `ai-logs/animation1_report1.txt` | Task animation1 报告 |
+| `ai-logs/animation2_report1.txt` | Task animation2 报告 |
+| `ai-logs/animation3_report1.txt` | Task animation3 报告 |
+| `ai-logs/animation4_report1.txt` | Task 15（2D 俯视）报告 |
+| `src/the_curved_world/obstacles.py` | Task 10-16：障碍物生成、周期接缝碰撞、切线滑动 |
+| `tests/test_first_person.py` | Task 10：切空间标架与相对移动测试 |
+| `tests/test_obstacles.py` | Task 10：障碍物确定性/安全边距/接缝碰撞测试 |
+| `tests/test_slope_and_collision.py` | Task 11：坡度阻尼与滑动碰撞测试 |
+| `tests/test_obstacle_scale.py` | Task 16：新障碍物尺度与安全边距测试 |
+
+4.3 删除文件：0 个
+--------------------------------------------------------------------------------
+本轮不删除任何首轮提交文件，仓库根目录结构保持不变（仅内容更新与新增）。
+
+4.4 首轮提交中已过时 / 属"不再对应最新界面"但本轮保留的文件
+--------------------------------------------------------------------------------
+（不删除原因：它们是历史证据或仍有独立用途；如需精简请用户确认）
+
+| 文件 | 状态 | 建议 |
+| :--- | :--- | :--- |
+| `docs/architecture.md` | 未变但内容滞后 | 模块分层列表未包含 manifold/obstacles/maps 包/server/session 等演进模块；建议后续同步或重写 |
+| `docs/final_report.md` | 未变，历史快照 | Task 4 时点报告，保留为过程材料 |
+| `screenshots/01_local_tangent_view.png` | 已重新渲染 | Matplotlib 玩家视角；当前 Web 主视图已是 2D 俯视，该图不再代表最新交互界面（仍有渲染器证据价值） |
+| `ai-logs/active_report1.txt` | 未变，历史报告 | 描述早期界面，作为 AI 使用记录保留 |
+| `ai-logs/active_report2.txt` | 未变，历史报告 | 同上 |
+| `ai-logs/active_report3.txt` | 未变，历史报告 | 同上 |
+| `ai-logs/topology_report1.txt` | 未变，历史报告 | 同上 |
+| `ai-logs/plugin_report1.txt` | 未变，历史报告 | 同上 |
+| `ai-logs/plug_in2_report1.txt` | 未变，历史报告 | 同上 |
+| `ai-logs/test_report.txt` | 未变，历史报告 | 同上 |
+
+4.5 未变文件（37 个，抽查）
+--------------------------------------------------------------------------------
+Makefile、pyproject.toml、requirements-dev.txt、src/main.py、
+src/the_curved_world/{__init__,cli,demo,detector,geometry,observations,render,session}.py、
+tests/{__init__,test_cli,test_closed_manifold,test_demo,test_detector,test_geometry,
+test_information_boundary,test_large_scale,test_map_registry,test_math_audit,
+test_render,test_server,test_smoke,test_world_generation}.py、
+docs/{architecture,contributing_extensions,final_report}.md、
+ai-logs/{active_report1,active_report2,active_report3,plug_in2_report1,plugin_report1,
+test_report,topology_report1}.txt、screenshots/*（除上述 3 张，见 4.1）。
+
+五、提交与推送
+--------------------------------------------------------------------------------
+- 分支：codex/task16-packaging（基于 origin/main，不基于本地开发历史）
+- 提交信息：feat(gameplay): enlarged obstacles, victory modal flow and submission packaging
+- 推送：git push -u origin codex/task16-packaging（禁止 --force；不推送 main）
+- 合并：由用户本人在 GitHub 上手动完成
+- 具体 commit 哈希与推送输出见本次对话最终交付摘要。
+
+六、复现步骤
+--------------------------------------------------------------------------------
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest
+node --check web\app.js
+.\.venv\Scripts\python.exe -m src.main --serve --port 8000
+# 浏览器打开 http://127.0.0.1:8000/
+# 打包（本报告采用的命令；不写入只读 submission/）：
+.\.venv\Scripts\python.exe scripts\package_submission.py --output temp\task16_package
+```
+================================================================================
