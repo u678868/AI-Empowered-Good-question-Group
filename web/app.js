@@ -1752,7 +1752,6 @@ async function enterWorld() {
     PHYS.uv = null;
     PHYS.dirty = false;
     PHYS.hitFlash = 0;
-    hideCard();
     // Drop the privileged cache with the old world so nothing stale can be
     // redrawn; setGodView() below re-reads it for the new session.
     state.debugState = null;
