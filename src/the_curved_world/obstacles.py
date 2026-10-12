@@ -108,8 +108,15 @@ class ObstacleField:
         clear by at least ``safe_margin`` of *ambient* distance.
         """
         count = int(getattr(config, "obstacle_count", 0))
-        base_radius = float(getattr(config, "obstacle_radius", 1.0))
-        margin = float(getattr(config, "obstacle_safe_margin", 0.0)) if safe_margin is None else float(safe_margin)
+        # Task 17: the geometric scale S shrinks every physical footprint by 1/S
+        # without resampling the underlying manifold.
+        scale = float(getattr(config, "scale_factor", 1.0)) or 1.0
+        base_radius = float(getattr(config, "obstacle_radius", 1.0)) / scale
+        margin = (
+            float(getattr(config, "obstacle_safe_margin", 0.0)) / scale
+            if safe_margin is None
+            else float(safe_margin)
+        )
         if count <= 0:
             return cls(manifold, ())
 

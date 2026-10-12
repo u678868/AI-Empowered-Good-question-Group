@@ -85,7 +85,10 @@ def test_move_payload_shape() -> None:
     assert payload["position"] != before
     assert payload["steps"] == 1
     assert 0.0 <= payload["signal"] <= 1.0
-    assert payload["label"] in ("Weak", "Moderate", "Strong")
+    # Task 19: the exit detector sleeps until the academy trials are complete,
+    # so the label is either a real band or the sealed placeholder.
+    assert payload["label"] in ("Weak", "Moderate", "Strong", "Sealed")
+    assert payload["detector_locked"] is True
     assert "exit_position" not in payload
 
 

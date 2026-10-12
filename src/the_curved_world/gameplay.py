@@ -21,6 +21,8 @@ import numpy as np
 from src.the_curved_world.config import ConfigError
 from src.the_curved_world.geometry import ambient_distance
 from src.the_curved_world.manifold import wrap_parameter
+from src.the_curved_world.quest import QuestManager, TriangleMeasurement, empty_quest_state
+from src.the_curved_world.ropes import Rope, RopeError, RopeNode, RopeSystem
 from src.the_curved_world.observations import (
     ObservationConfig,
     PlayerObservation,
@@ -71,6 +73,9 @@ class GameplayConfig:
     player_radius: float = 0.6
     eye_height: float = 2.0
     slope_damping: float = 3.0
+    # Task 17: geometric scale S and difficulty tier (easy / medium / hard).
+    scale_factor: float = 1.0
+    difficulty: str = "easy"
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -80,7 +85,7 @@ class GameplayConfig:
         ):
             if not np.isfinite(value) or value <= 0.0:
                 raise ConfigError(f"GameplayConfig.{name} must be finite and > 0")
-        if self.capture_radius < self.step_length:
+        if self.effective_capture_radius < self.step_length:
             raise ConfigError(
                 "GameplayConfig.capture_radius must be >= move_speed * time_step "
                 f"({self.step_length}), got {self.capture_radius}"
@@ -89,6 +94,10 @@ class GameplayConfig:
             raise ConfigError("GameplayConfig.eye_height must be > 0")
         if not np.isfinite(self.slope_damping) or float(self.slope_damping) < 0.0:
             raise ConfigError("GameplayConfig.slope_damping must be >= 0")
+        if not np.isfinite(float(self.scale_factor)) or not (0.2 <= float(self.scale_factor) <= 10.0):
+            raise ConfigError("GameplayConfig.scale_factor must be within [0.2, 10.0]")
+        if str(self.difficulty).strip().lower() not in ("easy", "medium", "hard"):
+            raise ConfigError("GameplayConfig.difficulty must be one of easy/medium/hard")
         if int(self.max_pointer_uses) < 0:
             raise ConfigError("GameplayConfig.max_pointer_uses must be >= 0")
         if int(self.pointer_sectors) < 1:
@@ -96,7 +105,19 @@ class GameplayConfig:
 
     @property
     def step_length(self) -> float:
-        return self.move_speed * self.time_step
+        return self.move_speed * self.time_step / float(self.scale_factor)
+
+    @property
+    def effective_capture_radius(self) -> float:
+        return float(self.capture_radius) / float(self.scale_factor)
+
+    @property
+    def effective_player_radius(self) -> float:
+        return float(self.player_radius) / float(self.scale_factor)
+
+    @property
+    def effective_eye_height(self) -> float:
+        return float(self.eye_height) / float(self.scale_factor)
 
 
 @dataclass(frozen=True)
@@ -151,6 +172,7 @@ class ExplorationGame:
         world: WorldState,
         gameplay_config: GameplayConfig | None = None,
         observation_config: ObservationConfig | None = None,
+        quest_manager: QuestManager | None = None,
     ) -> None:
         if not isinstance(world, WorldState):
             raise TypeError("ExplorationGame requires a WorldState")
@@ -160,9 +182,19 @@ class ExplorationGame:
         self._config = GameplayConfig() if gameplay_config is None else gameplay_config
         self._pointer_uses_remaining = int(self._config.max_pointer_uses)
         self._obstacles = getattr(world, "obstacles", None)
-        self._player_radius = float(self._config.player_radius)
+        self._player_radius = float(getattr(self._config, "effective_player_radius", self._config.player_radius))
         self._yaw = 0.0
         self._last_slope = {"slope": 0.0, "speed_scale": 1.0}
+        self._effective_steps = 0.0
+        self._tool_usages: Dict[str, int] = {
+            "detector": 0,
+            "pointer": 0,
+            "curvature": 0,
+            "triangle": 0,
+            "marker": 0,
+        }
+        self._quest_manager = quest_manager
+        self._ropes = RopeSystem()
         self._position: ParameterPosition = (float(world.start[0]), float(world.start[1]))
         self._steps = 0
         self._elapsed = 0.0
@@ -201,6 +233,90 @@ class ExplorationGame:
     @property
     def step_length(self) -> float:
         return self._config.step_length
+
+    @property
+    def detector_locked(self) -> bool:
+        """Task 19: the exit detector sleeps until every geometric seal is claimed."""
+        return self._quest_manager is not None and not self._quest_manager.exit_unlocked
+
+    @property
+    def rope_system(self) -> RopeSystem:
+        return self._ropes
+
+    @property
+    def rope_remaining(self) -> float:
+        return self._ropes.remaining
+
+    def connect_rope(self, node_a: RopeNode, node_b: RopeNode) -> Rope:
+        try:
+            return self._ropes.connect(node_a, node_b)
+        except RopeError as exc:
+            raise GameError(str(exc)) from exc
+
+    def clear_ropes(self, rope_id: int | None = None) -> int:
+        try:
+            return self._ropes.clear(rope_id)
+        except RopeError as exc:
+            raise GameError(str(exc)) from exc
+
+    def rope_state(self) -> Dict[str, object]:
+        return self._ropes.state_payload()
+
+    @property
+    def quest_manager(self) -> QuestManager | None:
+        return self._quest_manager
+
+    def quest_state(self) -> Dict[str, object]:
+        """Task 18: current quest / relic / seal state for the player payload."""
+        if self._quest_manager is None:
+            return empty_quest_state()
+        return self._quest_manager.state_payload()
+
+    def evaluate_triangle_measurement(self, report: Dict[str, object]) -> Dict[str, object] | None:
+        """Feed a goniometer report into the active quest (Task 18)."""
+        if self._quest_manager is None:
+            return None
+        quest = self._quest_manager.active_quest
+        if quest is None:
+            return None
+        measurement = TriangleMeasurement(
+            angle_sum=float(report.get("sum", 0.0)),
+            markers=tuple(str(name) for name in report.get("markers", ())),
+            excess=float(report.get("excess", 0.0)),
+            curvature_integral=float(report.get("curvature_integral", 0.0)),
+        )
+        result = self._quest_manager.evaluate_measurement(measurement)
+        if result is None or not result.completed:
+            return None
+        # A completed seal may open the exit while the player is already standing on it.
+        self._update_victory()
+        return {
+            "quest_id": quest.id,
+            "quest": self._quest_manager.state_payload(),
+            "proof": self._quest_manager.completion_payload(quest, result),
+        }
+
+    @property
+    def effective_steps(self) -> float:
+        """Task 17: uphill-weighted movement cost (sum of 1 / speed_scale)."""
+        return float(self._effective_steps)
+
+    @property
+    def tool_usages(self) -> Dict[str, int]:
+        return dict(self._tool_usages)
+
+    @property
+    def score(self) -> float:
+        return float(self.calculate_score())
+
+    def calculate_score(self) -> float:
+        """Reserved scoring hook (Task 17): returns 0 until a formula is added."""
+        return 0.0
+
+    def record_tool_usage(self, name: str) -> None:
+        key = str(name).strip().lower()
+        if key in self._tool_usages:
+            self._tool_usages[key] += 1
 
     @property
     def log(self) -> Tuple[LogEntry, ...]:
@@ -305,7 +421,7 @@ class ExplorationGame:
 
     @property
     def eye_height(self) -> float:
-        return float(self._config.eye_height)
+        return float(getattr(self._config, "effective_eye_height", self._config.eye_height))
 
     def camera_position(self) -> np.ndarray:
         """First-person camera point: lifted off the surface along the normal.
@@ -387,6 +503,7 @@ class ExplorationGame:
                 self._position = resolved
                 self._trajectory.append(self._position)
                 self._steps += 1
+                self._effective_steps += 1.0 / max(float(penalty["speed_scale"]), 1e-9)
                 self._elapsed += self._config.time_step
                 self._update_victory()
                 return MoveResult(self._position, moved=True, clamped=clamped,
@@ -396,6 +513,7 @@ class ExplorationGame:
         self._position = candidate
         self._trajectory.append(self._position)
         self._steps += 1
+        self._effective_steps += 1.0 / max(float(penalty["speed_scale"]), 1e-9)
         self._elapsed += self._config.time_step
         self._update_victory()
         return MoveResult(self._position, moved=True, clamped=clamped, won=self._won)
@@ -407,14 +525,41 @@ class ExplorationGame:
         hand the resulting parameter position back. The server still owns world
         state, collision audit and the victory decision.
         """
+        previous = self._position
         wrapped, _ = self._clamp((float(u), float(v)))
+        du = wrapped[0] - previous[0]
+        dv = wrapped[1] - previous[1]
+        if getattr(self._player.surface, "periodic", False):
+            du = wrap_parameter(du)
+            dv = wrap_parameter(dv)
+        if math.hypot(du, dv) > 1e-12:
+            penalty = self.calculate_slope_penalty(previous[0], previous[1], du, dv)
+            self._last_slope = penalty
+            self._effective_steps += 1.0 / max(float(penalty["speed_scale"]), 1e-9)
         self._position = wrapped
         self._trajectory.append(self._position)
         self._update_victory()
         return MoveResult(self._position, moved=True, clamped=False, won=self._won)
+    def _detector_silent(self) -> bool:
+        """Task 17/19: the seal and the medium / hard tiers hide every distance cue."""
+        if self.detector_locked:
+            return True
+        tier = str(getattr(self._config, "difficulty", "easy")).strip().lower()
+        return tier in ("medium", "hard")
+
+    def _neutral_observation(self) -> PlayerObservation:
+        # PlayerObservation only accepts Weak/Moderate/Strong; the web layer
+        # relabels this placeholder as Offline / Reserved for the player.
+        return PlayerObservation(signal=0.0, label="Weak", trend="same")
+
     def read_detector(self, note: str | None = None) -> PlayerObservation:
         """Take a detector reading, append it to the log and return it."""
-        observation = self._observer.observe(self._position)
+        self._tool_usages["detector"] += 1
+        observation = (
+            self._neutral_observation()
+            if self._detector_silent()
+            else self._observer.observe(self._position)
+        )
         self._log.append(
             LogEntry(
                 index=len(self._log) + 1,
@@ -434,7 +579,8 @@ class ExplorationGame:
             raise GameError("marker name must be non-empty")
         if cleaned in self._markers:
             raise GameError(f"marker {cleaned!r} already exists")
-        observation = self._observer.peek(self._position)
+        self._tool_usages["marker"] += 1
+        observation = self.peek_detector()
         marker = Marker(
             name=cleaned,
             position=self._position,
@@ -451,6 +597,7 @@ class ExplorationGame:
         Honest scope: these are tangent-plane angles, an approximation to the
         angle sum of a geodesic triangle -- not an exact geodesic computation.
         """
+        self._tool_usages["triangle"] += 1
         positions = []
         for name in (name_a, name_b, name_c):
             marker = self._markers.get(name)
@@ -504,6 +651,8 @@ class ExplorationGame:
         Does not append to the log and does not change the trend baseline; used
         by the visualiser to show the current signal without side effects.
         """
+        if self._detector_silent():
+            return self._neutral_observation()
         return self._observer.peek(self._position)
 
     @property
@@ -596,6 +745,7 @@ class ExplorationGame:
         """
         if self._pointer_uses_remaining <= 0:
             raise GameError("no pointer uses remaining")
+        self._tool_usages["pointer"] += 1
 
         surface = self._player.surface
         x, y = self._position
@@ -662,5 +812,13 @@ class ExplorationGame:
         if self._won:
             return
         distance = ambient_distance(self._world.position(self._position), self._world.exit_position())
-        if distance <= self._config.capture_radius:
+        sealed = self._quest_manager is not None and not self._quest_manager.exit_unlocked
+        capture = float(getattr(self._config, "effective_capture_radius", self._config.capture_radius))
+        if distance <= capture:
+            if sealed:
+                # Task 18: the exit stays sealed until every geometric relic is claimed.
+                self._quest_manager.mark_seal_contact(True)
+                return
             self._won = True
+        elif sealed:
+            self._quest_manager.mark_seal_contact(False)

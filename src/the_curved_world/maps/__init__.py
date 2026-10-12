@@ -49,6 +49,7 @@ class MapMetadata:
     topology: str
     factory: Callable[[Dict[str, Any]], Any]
     placement: Dict[str, float] = field(default_factory=dict)
+    genus: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """JSON-safe view (the callable factory is deliberately omitted)."""
@@ -59,6 +60,7 @@ class MapMetadata:
             "topology": self.topology,
             "periodic": self.topology == CLOSED_PERIODIC,
             "placement": dict(self.placement),
+            "genus": self.genus,
         }
 
 
@@ -115,6 +117,7 @@ def register_map(
     description: str,
     topology: str,
     placement: Optional[Dict[str, float]] = None,
+    genus: Optional[int] = None,
 ):
     """Class/function decorator that registers a map factory.
 
@@ -132,6 +135,7 @@ def register_map(
                 topology=topology,
                 factory=factory,
                 placement=dict(placement or {}),
+                genus=genus,
             )
         )
         return target
