@@ -8,6 +8,7 @@ from typing import Tuple
 import numpy as np
 
 from src.the_curved_world.config import (
+    DISTANCE_EUCLIDEAN,
     ConfigError,
     GaussianHill,
     SurfaceConfig,
@@ -15,7 +16,7 @@ from src.the_curved_world.config import (
     WorldConfig,
 )
 from src.the_curved_world.detector import Detector, DetectorConfig
-from src.the_curved_world.geometry import SmoothSurface, ambient_distance
+from src.the_curved_world.geometry import SmoothSurface, ambient_distance, world_distance
 from src.the_curved_world.obstacles import ObstacleField
 from src.the_curved_world.observations import PlayerObserver, PlayerView
 
@@ -30,6 +31,11 @@ class WorldState:
     therefore compute exact distances. Ordinary player-facing components must be
     obtained through :meth:`player_view` / :meth:`player_observer` instead of
     receiving this object directly.
+
+    ``distance_mode`` selects how the world measures distance between two places
+    (see :attr:`~src.the_curved_world.config.WorldConfig.distance_mode`); it
+    defaults to plain ambient Euclidean distance, which is what every map except
+    the antipodal projective plane uses.
     """
 
     surface: SmoothSurface
@@ -38,6 +44,7 @@ class WorldState:
     exit: ParameterPosition
     detector: Detector
     obstacles: ObstacleField | None = None
+    distance_mode: str = DISTANCE_EUCLIDEAN
 
     def position(self, parameter_position: ParameterPosition) -> np.ndarray:
         """Embedded 3D position of a parameter-space location."""
@@ -51,9 +58,16 @@ class WorldState:
         """PRIVILEGED: the true embedded exit position."""
         return self.position(self.exit)
 
+    def exit_realizations(self) -> Tuple[np.ndarray, ...]:
+        """PRIVILEGED: every 3D realization of the exit (one, normally)."""
+        orbit = getattr(self.surface, "orbit_positions", None)
+        if callable(orbit):
+            return tuple(orbit(float(self.exit[0]), float(self.exit[1])))
+        return (self.exit_position(),)
+
     def ambient_distance(self, p: ParameterPosition, q: ParameterPosition) -> float:
-        """Ambient Euclidean distance between two surface positions."""
-        return ambient_distance(self.position(p), self.position(q))
+        """Distance between two surface places under this world's policy."""
+        return world_distance(self.surface, p, q, self.distance_mode)
 
     def player_view(self) -> PlayerView:
         """Build a player-facing view that cannot see the exit."""
@@ -104,8 +118,12 @@ class DebugView:
     def exit_position(self) -> np.ndarray:
         return self._world.exit_position()
 
+    def exit_realizations(self) -> Tuple[np.ndarray, ...]:
+        """PRIVILEGED: every 3D realization of the exit (the antipodal pair on RP^2)."""
+        return self._world.exit_realizations()
+
     def distance_to_exit(self, parameter_position: ParameterPosition) -> float:
-        return ambient_distance(self._world.position(parameter_position), self._world.exit_position())
+        return self._world.ambient_distance(parameter_position, self._world.exit)
 
     def signal(self, parameter_position: ParameterPosition) -> float:
         return self._world.detector.signal(self._world.position(parameter_position))
@@ -144,7 +162,12 @@ class WorldGenerator:
         surface = SmoothSurface(self._build_surface_config(rng)) if isinstance(base, SurfaceConfig) else base
         start = self._sample_parameter(rng)
         exit_ = self._place_exit(rng, surface, start)
-        detector = Detector(surface.position(*exit_), DetectorConfig(cfg.detector_scale))
+        # The detector watches every realization of the exit. On a quotient world
+        # (projective plane) those are the antipodal pair and the reading is the
+        # nearest one -- a single point for every other map.
+        orbit = getattr(surface, "orbit_positions", None)
+        targets = orbit(*exit_) if (callable(orbit) and cfg.distance_mode == "orbit_min") else surface.position(*exit_)
+        detector = Detector(targets, DetectorConfig(cfg.detector_scale))
         # Stage 2: obstacles are scattered *after* the smooth surface exists, and are
         # kept clear of the start and the exit by a safe margin.
         obstacles = ObstacleField.generate(surface, cfg, seed, exclude_points=(start, exit_))
@@ -155,6 +178,7 @@ class WorldGenerator:
             exit=exit_,
             detector=detector,
             obstacles=obstacles,
+            distance_mode=cfg.distance_mode,
         )
 
     # -- internals ---------------------------------------------------------
@@ -195,10 +219,12 @@ class WorldGenerator:
         self, rng: np.random.Generator, surface: SmoothSurface, start: ParameterPosition
     ) -> ParameterPosition:
         cfg = self._config
-        start_position = surface.position(*start)
         for _ in range(cfg.max_placement_attempts):
             candidate = self._sample_parameter(rng)
-            if ambient_distance(surface.position(*candidate), start_position) >= cfg.min_separation:
+            # Measured with the world's own policy: on an antipodal quotient the
+            # antipode of the start is the *same place*, so a plain Euclidean
+            # check would happily place the exit on top of the player.
+            if world_distance(surface, candidate, start, cfg.distance_mode) >= cfg.min_separation:
                 return candidate
         raise ConfigError(
             "could not place the exit with the requested min_separation after "

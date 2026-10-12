@@ -273,13 +273,18 @@ class MyMap:
         return SmoothSurface(...)
 ```
 
-**已注册的 4 张地图**
+**已注册的 9 张地图**
 
 | id | 名称 | 拓扑 | 播放提示 |
 | :--- | :--- | :--- | :--- |
 | `torus_genus1` | 变形环面（亏格 1） | closed_periodic | 默认；χ=0，∬K dA=0 |
 | `ellipsoid_genus0` | 波动椭球（亏格 0） | closed_periodic | χ=2，双层覆盖，两极退化 |
 | `double_torus` | 双孔近似（亏格 2 外观） | closed_periodic | 双瓣轮廓；真亏格 2 需亏格 2 参数域 |
+| `klein_bottle` | 克莱因瓶（figure-8 浸入） | closed_periodic | χ=0；R³ 中必然自交，无全局外侧（Task 17） |
+| `klein_bottle_traditional` | 经典瓶形克莱因瓶 | closed_periodic | 脖子穿过瓶身；与上一张分属三个正则同伦类中的两个（Task 18） |
+| `knot_garden` | 打结环面（三叶结管道） | closed_periodic | 拓扑仍是环面，但**嵌入**是打的结：两股在三维里很近、沿曲面却很远（Task 18） |
+| `elliptic_curve` | 椭圆曲线 ℂ/(ℤ+iℤ) | closed_periodic | 共形模型，模数恰为 τ=i；胖管窄孔，三维近邻极多（Task 18） |
+| `projective_plane` | 实射影平面 RP²（对跖） | closed_periodic | 不可定向、χ=1；**你的对跖点就是你**，唯一使用 `orbit_min` 距离策略的图（Task 18） |
 | `planar_landscape` | 经典平面图曲面 | bounded_plane | 有界 100x100，带边界钳制 |
 
 **命令行切图**
@@ -288,6 +293,9 @@ class MyMap:
 .\.venv\Scripts\python.exe -m src.main --serve --map torus_genus1
 .\.venv\Scripts\python.exe -m src.main --serve --map ellipsoid_genus0 --debug
 .\.venv\Scripts\python.exe -m src.main --play --map double_torus --seed 7
+.\.venv\Scripts\python.exe -m src.main --play --map klein_bottle --seed 12345
+.\.venv\Scripts\python.exe -m src.main --play --map knot_garden --seed 12345
+.\.venv\Scripts\python.exe -m src.main --serve --map projective_plane --debug
 .\.venv\Scripts\python.exe -m src.main --demo-scenario --map planar_landscape
 ```
 
@@ -540,6 +548,209 @@ class MyMap:
 - **槽位 5 学院任务书**：`#codex-modal` 羊皮纸风格面板（任务总览、印记收集栏、隐秘学派提示），
   点击槽位 5 或按 `J` 开合；绳索与量具 payload 只包含玩家已知节点，绝不泄露出口或真实距离。
 
+> **编号说明**：本分支的 Task 17 / 18 指「克莱因瓶关卡」与「四张新地图」；上游 main 的 Task 17 / 18 / 19
+> 指「缩放与难度」「几何印记任务」「绳索与量具」。两条工作线并行开发，合并后编号重名，故并列保留。
+
+
+## 克莱因瓶关卡：不可嵌入、不可定向的封闭世界（Task 17）
+
+新增第 5 张地图 `klein_bottle`，按既有插件规范注册（只加了一个 `KleinBottle` 模型 + 一条注册项，
+**未改动**世界生成器、探测器和信息边界的任何主逻辑）：
+
+```powershell
+.\.venv\Scripts\python.exe -m src.main --serve --map klein_bottle --debug
+.\.venv\Scripts\python.exe -m src.main --play  --map klein_bottle --seed 12345
+```
+
+### 实现的是什么（不含糊）
+
+克莱因瓶**不可能嵌入 R³**，所以本关给出的是一张**浸入**（immersion）——经典 figure-8 浸入：
+
+```
+P(u, v) = R + t ( cos(u/2) sin v - sin(u/2) sin 2v )
+Q(u, v) = t ( sin(u/2) sin v + cos(u/2) sin 2v )
+r(u, v) = ( P cos u, P sin u, Q )          # R = 90, t = 31
+```
+
+`r_u / r_v / r_uu / r_uv / r_vv` 全部**解析求出**（利用手推恒等式 `P_u = -Q/2`、`Q_uu = -Q/4`），
+运行时不做数值差分；一阶偏导与中心差分误差 < 2.1e-8，二阶 < 2.4e-6。
+
+| 事实 | 实测 |
+| :--- | :--- |
+| 处处正则（真浸入） | `min(E G - F²) ≈ 1.27e6`，退化点比例 **0** |
+| **必然自交** | `r(u, 0) = r(u, pi) = (R cos u, R sin u, 0)`：z=0 平面内半径 R 的圆被覆盖**两次**，两处法向不平行（横截交叉） |
+| **不可定向** | 沿 u 环绕一周后法向反向：`n(u + 2pi, v) = -n(u, -v)`，误差 ~2.8e-16；本关**没有全局"外侧"** |
+| 高斯-博内 | χ = 0，故 `∬K dA = 0`——数值实测 **0.0000**（与环面同） |
+| 表面积（数值） | ≈ 1.66e5（R=90, t=31） |
+
+### chart 周期不再是 2π × 2π（本任务的工程重点）
+
+`r(u + 2pi, v) = r(u, -v)`：u 方向平移 2π **不是恒等变换**，而是把 v 镜像。
+如果照旧按 `wrap_parameter` 把 u 独立折回 `[-pi, pi)`，玩家每跨过一次缝，局部图就会整体镜像一次——那是可见的穿帮。
+
+解决方案是把"chart 如何识别自己的点"收敛成 manifold 的**公开接口**，各层只查询、不假设：
+
+| 接口 | 环面 / 椭球 / 双孔近似 | 克莱因瓶 |
+| :--- | :--- | :--- |
+| `chart_periods()` | `(2pi, 2pi)` | `(4pi, 2pi)`：平移周期是 4π，平移 2π 会翻转 v |
+| `wrap(u, v)` | 独立折回 `[-pi, pi)` | 按 4π/2π 折回（**纯平移**，曲面上完全不可见，不做翻转归一化） |
+| `chart_copies()` | 1 份 | 2 份（每个曲面点在 chart 中有 `(u, v)` 与 `(u + 2pi, -v)` 两份坐标） |
+| `chart_relative()` | 等价于 `wrap_difference` | 在**两份**坐标中挑最近的一份，跨缝"近处仍然近" |
+
+调用方相应改为查询 surface：`gameplay._clamp`、`ObstacleField.resolve_collision`（滑动碰撞回溯）、
+`/api/state/player` 新增的 `twisted` / `orientable` / `chart_periods` 字段，
+以及前端 `web/app.js` 的 `chartDelta` / `localize` / 硬碰撞包裹（同一套周期 + 副本规则）。
+
+**实测（连续移动，步长 0.25）**
+
+| 检查 | 结果 |
+| :--- | :--- |
+| 沿 u / v / 对角各走 400 步 | 坐标始终在 `[-2pi, 2pi) × [-pi, pi)`，`clamped` 恒为 False |
+| 跨缝连续性 | 跨过 u = ±2π 时单步三维位移 ≤ `|r_u| × 步长`（无瞬移）；`wrap` 前后三维坐标差 < 1e-9 |
+| 前端相对包裹 | `chartDelta` 把另一份坐标识别为零位移（node 侧单测通过，含"隔缝邻居"用例） |
+
+### 玩法上与诚实说明
+
+- 探测器仍是**环境三维欧氏距离**（与其它地图口径完全一致）。在自交圆上两个**不同**的曲面点三维重合，
+  因此探测器在那里给出**相同**读数；`signal = 1` 当且仅当玩家恰好位于出口的三维位置。
+- 障碍物碰撞同样按**环境三维距离**判定。这意味着自交圆对应的两条参数线 `v = 0` 与 `v = pi` 附近
+  （每侧各约 0.074，两者合计约占 v 周期的 4.7%，由 `(障碍半径 + 玩家半径) / (t√5)` 精确给出）
+  另一支曲面上的障碍物也满足碰撞判据：后端 `move` 路径会阻挡，
+  而前端按局部 chart 做硬碰撞、并把该障碍物画在 chart 上的远处（视口之外）。
+  **所以这一薄带内"看不见却被挡 / 穿过去"是可能的**——这是自交浸入模型在 R³ 中的固有边界，
+  本版如实标注，不用特判把它藏起来。
+- 上帝视角（`/api/state/debug`）为克莱因瓶覆盖 `sample_grid`：绘制 `[0, 2pi]²` 基本域，
+  其 u=0 与 u=2π 两条边曲线是**同一条曲线按 v 反向**（`r(0, -v) = r(2pi, v)`），因此画面是闭合的，
+  自交处按画家算法正常显示。
+
+### 上帝视角修复：切图后不再显示上一张地图（Task 17 修正）
+
+**症状**：在上帝视角已打开的情况下从大厅换图，3D 面板仍显示**上一张**地图的网格——
+换成克莱因瓶后看起来"克莱因瓶的 3D 图没有绘制"。
+
+**根因**：`setGodView(true)` 在"已经处于该状态"时直接 `drawGodView()` 重绘**缓存**的
+`state.debugState`，从不重新请求 `/api/state/debug`；而 `/api/session/new` 已经重建了世界。
+用无头浏览器实测（planar_landscape → klein_bottle）：切换后画布像素与切换前**逐位相同**，
+而当前会话的模型已经是 `figure-8 Klein bottle`。
+
+**修复**（`web/app.js`）：
+
+- 新增 `refreshGodView()`：**总是**重新 GET `/api/state/debug` 再重绘；
+- `setGodView()` 在"已是目标状态且可见"时也走 `refreshGodView()`；`toggleGodView()` 复用同一函数；
+- `enterWorld()` 在重建世界时清空 `state.debugState`，杜绝任何陈旧网格被重绘。
+
+**顺带修正的可见性问题**（否则"画了但看不见"）：
+
+| 问题 | 修正 |
+| :--- | :--- |
+| 上帝画布用固定的 760x520 属性尺寸绘制，再由 CSS 拉伸到面板宽度（最高约 1400px）→ 明显模糊 | `drawGodView` 改用 `frameCanvas(canvas)`，按 CSS 尺寸 × DPR 绘制（与主地图一致） |
+| 画布宽高比 1.46 且占满整行 → 面板高达约 950px，3D 图基本落在屏幕外 | 属性改为 `1000x500`（2:1），CSS `#god-canvas { max-width: 1000px; margin: 0 auto; }` |
+| 归一化后曲面只占画布约 42% | 投影填充系数 `0.42 -> 0.68`（`|rx| <= 0.707` 的上界保证任意 yaw 下都不裁切） |
+| 按 `G` 后仍需手动滚动才看得到 3D 面板 | 打开时 `scrollIntoView({block: 'start'})`（瞬时，确保按下即可见） |
+
+**回归验证**（无头 Edge，1600x1000）：planar_landscape → klein_bottle 切换后，
+画布实际绘制包围盒与当前会话的投影包围盒**完全一致**（`163,832,136,358`），
+`scrollY = maxScroll`，上帝画布 CSS 尺寸 `1000x500`。Python 侧 176 项测试保持全通过。
+
+## 四张新地图：打结环面 / 瓶形克莱因瓶 / 椭圆曲线 / 射影平面（Task 18）
+
+```powershell
+.\.venv\Scripts\python.exe -m src.main --play  --map knot_garden --seed 12345
+.\.venv\Scripts\python.exe -m src.main --play  --map klein_bottle_traditional --seed 12345
+.\.venv\Scripts\python.exe -m src.main --serve --map elliptic_curve --debug
+.\.venv\Scripts\python.exe -m src.main --serve --map projective_plane --debug
+```
+
+### 1. 打结环面 `knot_garden`（拓扑平凡，嵌入不平凡）
+
+管道沿 (2,3) 环面结走：`theta = 2u, phi = 3u`，
+`K(u) = ((R + a cos phi) cos theta, (R + a cos phi) sin theta, a sin phi)`，
+再用载环面自身的正交标架（外法向 `N` 与 `phi` 切向 `E`）造管：
+
+```
+r(u, v) = K(u) + rho ( cos v N(u) + sin v E(u) )
+```
+
+标架不做法向归一化（没有 Frenet 退化），因此一二阶偏导全部初等解析。
+
+| 事实 | 实测 |
+| :--- | :--- |
+| 拓扑 | 仍是**环面**：可定向、χ=0、∬K dA = **−3.6e-15** |
+| 正则性 | `min(EG−F²) = 36864 > 0`，退化点比例 0 |
+| 嵌入性 | 构造期校验 `tube_radius < 股间距/2`；本图股间中心距 20.0，取 rho=8 |
+| 玩法核心 | 两股在三维里最近约 **12.0**，而沿曲面要走半圈（≈200）；`detector_scale = 30`，所以探测器在两股上读数几乎一样 |
+
+这正是"环境距离 ≠ 曲面距离"的极致版本：打结的**不是曲面而是嵌入**，所以数学上它还是一只甜甜圈。
+
+### 2. 经典瓶形克莱因瓶 `klein_bottle_traditional`
+
+采用维基百科给出的经典"瓶子"参数化（脖子穿过瓶身），并重参数化为本引擎的 chart 契约：
+
+```
+U = 2u,  w = v - pi/2   =>   r(U + 2pi, w) = r(U, -w)
+```
+
+| 事实 | 实测 |
+| :--- | :--- |
+| 与公开公式一致性 | 与逐字抄写的参考实现最大偏差 **8.9e-16** |
+| 正则性（真浸入） | `min(EG−F²) = 0.0094 > 0`，退化点比例 0 |
+| χ=0 | ∬K dA = **−3.4e-16** |
+| 必然自交 | 参数相距 2.18 的两点三维重合（脖子穿过瓶身），误差 < 0.01 |
+| 与 Task 17 的关系 | 正则同伦类：figure-8 浸入是**手性**的，经典瓶形是**非手性**的；两者合起来覆盖三类中的两类 |
+
+偏导的推导不在纸面硬推：轮廓写成 `(cos u, sin u)` 的多项式字典，由 `_poly_derivative` **符号求导**得到，再按 `d/du = (1/2) d/dU` 缩放——依然不运行时数值差分。
+
+### 3. 椭圆曲线 `elliptic_curve`（复分析的黎曼曲面）
+
+世界是**Clifford 环面的球极投影**，即环半径:管半径恰为 `sqrt(2):1` 的旋转环面。球极投影是共形的，所以这是一个**共形模型**：
+
+| 事实 | 实测 |
+| :--- | :--- |
+| 共形周期 | `W = integral r dv/(R + r cos v) = 2 pi r/sqrt(R^2 - r^2)`，与数值积分相对误差 **0** |
+| 共形模数 | `tau = i * r/sqrt(R^2 - r^2)`；本图取 R/r = sqrt2 时 **tau = i**（正方形格 ℂ/(ℤ+iℤ)） |
+| 其它半径 | (3,1) → 0.353553i、(5,2) → 0.436436i，公式与数值积分逐位一致 |
+| 拓扑 | χ=0，∬K dA = 3.1e-15；`min(EG−F²) = 5.9e5 > 0` |
+| 玩法 | 管粗孔小（孔半径 = 0.414 × 管半径），三维近邻极多 |
+
+**诚实边界（写进类文档与测试）**：这只是**共形**模型，不是等距嵌入——R³ 中根本不存在完备的平坦闭曲面（Hilbert）；本图的曲率是普通环面曲率（外正内负），只是总积分为 0。另外**紧黎曼曲面上不存在非常值全纯函数**，所以这里的"复分析"体现在共形结构，而不是某个全纯高度函数。
+
+### 4. 实射影平面 `projective_plane`（对跖世界，距离定义单独配置）
+
+RP² = 球面 / 对跖。椭球 chart 本来就双重覆盖球面（`r(u+pi, -v) = r(u, v)`），再商掉对跖映射即可：
+
+```
+r(u + pi, pi - v) = -r(u, v)
+```
+
+两个恒等式都是精确对称，前提是径向调制**关于 v 偶且关于 pi/2 对称**（即 `cos(2k v)`，等价于偶数阶、相位 pi/2 的谐波）——否则商空间根本不是 RP²，构造期直接报错。
+
+| 事实 | 实测 |
+| :--- | :--- |
+| chart 层数 | **4 层**：`(u,v)`、`(u+pi,-v)`（同一三维点）、`(u+pi,pi-v)`、`(u,v+pi)`（都是对跖点） |
+| 三维实现 | 4 层折叠成 **2** 个互为对跖的三维点（`orbit_positions` 返回 2 个） |
+| 高斯-博内 | RP² 自身 χ=1 → 2π；chart 覆盖球面两次、世界两次 → 原始积分 **8π**（实测 25.1168 vs 8π = 25.1327） |
+| 不可嵌入 | 与克莱因瓶不同：这里的 chart 映射是**覆盖映射**（2 对 1 到椭球上），不自交 |
+
+**距离定义单独配置（本任务唯一的引擎改动）**：`WorldConfig.distance_mode`
+
+| 取值 | 含义 | 谁在用 |
+| :--- | :--- | :--- |
+| `"euclidean"`（默认） | 两个三维实现之间的直线距离 | 其余**全部**地图，行为与改动前逐位一致 |
+| `"orbit_min"` | 对双方的 chart 副本取最小 | 只有 `projective_plane` |
+
+它的效果可以实测：出口与它的对跖 chart 点在世界距离上为 **0.0**（同一个地方），而两者三维相距 **84.6**；探测器在两个实现上读数都是 **1.000000**；从任一个实现 `sync_position` 都判定胜利；标记测距、障碍物碰撞/可见性、滑动碰撞、出口放置（`min_separation`）全部走同一策略。其它地图的 `distance_mode` 都是 `euclidean`，并有回归测试逐图比对"世界距离 == 朴素三维距离"。
+
+### chart 副本契约升级（数据驱动）
+
+Task 17 时前端把"翻转的孪生坐标"写死成 `(u + 2pi, -v)`；RP² 有 4 层、瓶形克莱因瓶的扭转也不同，写死不再成立。现在由内核下发：
+
+```
+"chart_copies": [[du, dv, flip_v], ...]      # 每层一个三元组
+"chart_periods": [p_u, p_v]
+```
+
+前端 `chartCopies()` 直接照抄，`chartDelta()` 在这些副本中挑最近的——因此"对跖点落在玩家脚下"这种 RP² 语义在前端也是自动正确的（已在 node 侧用真实 payload 逐图核对）。
+
 ## 目录结构
 
 ```
@@ -550,12 +761,15 @@ AI Empowered/
 ├── src/
 │   ├── main.py               # 命令行入口
 │   └── the_curved_world/     # 核心包
-│       ├── config.py         # 配置与校验
-│       ├── geometry.py       # 光滑曲面几何
+│       ├── config.py         # 配置与校验（含 distance_mode 距离策略）
+│       ├── geometry.py       # 光滑曲面几何 + world_distance（距离策略入口）
+│       ├── manifold.py       # 封闭流形（环面/椭球/双孔近似/克莱因瓶 x2/打结环面/椭圆曲线/射影平面）
 │       ├── detector.py       # 距离敏感探测器（特权）
 │       ├── observations.py   # 玩家可见接口（信息边界）
 │       ├── world.py          # 世界状态、生成器、调试视图
 │       ├── gameplay.py       # 探索玩法引擎（与界面无关）
+│       ├── obstacles.py      # 两阶段障碍物散布与接缝碰撞
+│       ├── maps/             # 地图注册表与内置地图（插件式）
 │       ├── render.py         # 3D 场景构建 + Matplotlib 实时渲染器
 │       ├── session.py        # 交互式会话主循环（Task 5）
 │       ├── cli.py            # 终端命令界面
@@ -594,19 +808,25 @@ AI Empowered/
 | `tests/test_render.py` | 渲染一致性、玩家视图不泄露、调试视图、网格缓存测试 |
 | `tests/test_server.py` | Web API、信息边界与注入内容扫描测试 |
 | `tests/test_large_scale.py` | 大尺度域、坐标钳制、第一基本形式、高斯-博内、指向器测试 |
-| `src/the_curved_world/manifold.py` | `ClosedManifold` 基类 + 变形环面 / 变形椭球 / 双孔近似；解析一阶二阶偏导与 K |
+| `src/the_curved_world/manifold.py` | `ClosedManifold` 基类 + 变形环面 / 变形椭球 / 双孔近似 / 克莱因瓶(figure-8) / 瓶形克莱因瓶 / 打结环面 / 椭圆曲线 / 射影平面；解析一阶二阶偏导与 K；chart 周期与副本契约 |
 | `tests/test_closed_manifold.py` | 三套模型的解析偏导精度、正则性、周期环绕、高斯-博内积分与信息边界 |
-| `src/the_curved_world/maps/`（`__init__.py` + `builtin.py`） | `MapMetadata` + `MapRegistry` + `@register_map`；4 张内置地图与 `world_config_for` |
+| `src/the_curved_world/maps/`（`__init__.py` + `builtin.py`） | `MapMetadata` + `MapRegistry` + `@register_map`；9 张内置地图与 `world_config_for` |
 | `tests/test_map_registry.py` | 注册、按 id 构造、非法 id、元数据完整性、装饰器扩展 |
-| `src/the_curved_world/obstacles.py` | `Obstacle` / `ObstacleField`：两阶段散布、安全边距、周期接缝碰撞 |
+| `src/the_curved_world/obstacles.py` | `Obstacle` / `ObstacleField`：两阶段散布、安全边距、周期接缝碰撞（走 manifold 的 wrap/chart_relative），并遵循距离策略 |
 | `tests/test_obstacles.py`、`tests/test_first_person.py` | 障碍物确定性/安全边距/接缝碰撞；标架正交性与相对移动 |
-| `tests/test_obstacle_scale.py` | Task 16 放大后的障碍物尺度、四图生成成功与出生点/出口安全边距 |
+| `tests/test_obstacle_scale.py` | Task 16 放大后的障碍物尺度、九图生成成功与出生点/出口安全边距 |
 | `tests/test_scaling_and_difficulty.py` | Task 17 缩放律、难度静默/占位与计分输入 |
 | `src/the_curved_world/scanner.py` | Task 18 流形可行性扫描（K 极值、符号反转带、亏格、可达参考角盈） |
 | `src/the_curved_world/quest.py` | Task 18 任务基类 / Gauss-Bonnet 任务 / QuestManager（确定性任务链 + 出口封印） |
 | `tests/test_quest_engine.py` | Task 18 扫描器精度、阈值宽松度、任务完成与出口封印测试 |
 | `src/the_curved_world/ropes.py` | Task 19 有限绳索池（单段上限 / 总长池 / 节点合法性 / 长度回收） |
 | `tests/test_ropes_and_tools.py` | Task 19 绳索连接、超长拒绝、量角器任务联动与探测器封印测试 |
+| `tests/test_klein_bottle.py` | Task 17：figure-8 浸入的正则性、2π 平移镜像 v、自交圆、法向反向、χ=0、跨缝无瞬移与信息边界 |
+| `tests/test_knotted_torus.py` | Task 18：打结环面的解析偏导、χ=0、嵌入性校验（股间距）与"两股三维很近"实测 |
+| `tests/test_bottle_klein.py` | Task 18：与公开瓶形公式逐点一致（8.9e-16）、扭转识别、自交、χ=0、网格闭合 |
+| `tests/test_elliptic_curve.py` | Task 18：共形模数 τ=i 与数值积分互证、非平坦性、窄孔近邻、非法形变被拒 |
+| `tests/test_projective_plane.py` | Task 18：两个对合恒等式、4 层 chart、8π/2π 高斯-博内、`orbit_min` 距离策略与其它地图的回归 |
+| `docs/work_report.md` | 本轮工作总结报告：交付物、实测数字、上游合并记录、诚实边界、复现命令 |
 
 ## 功能状态表
 
@@ -670,6 +890,19 @@ AI Empowered/
 | 复合量具 Ruler / Protractor + Quest 联动（Task 19） | `src/the_curved_world/server.py`、`web/app.js` | ✅ 已完成 |
 | 5 槽测绘工具链与学院任务书（Task 19） | `web/index.html`、`web/app.js`、`web/style.css` | ✅ 已完成 |
 | 绳索 / 量具回归测试（Task 19） | `tests/test_ropes_and_tools.py` | ✅ 已完成 |
+| 克莱因瓶浸入模型（解析微分几何，Task 17） | `src/the_curved_world/manifold.py` | ✅ 已完成 |
+| 非平凡 chart 周期与副本识别（`chart_periods` / `chart_copies` / `chart_relative`，Task 17） | `manifold.py`、`gameplay.py`、`obstacles.py` | ✅ 已完成 |
+| 跨周期缝的移动与碰撞走 manifold 接口（Task 17） | `gameplay.py`、`obstacles.py`、`server.py` | ✅ 已完成 |
+| 前端同口径相对包裹（`twisted` / `chart_periods`，Task 17） | `web/app.js`、`server.py` | ✅ 已完成 |
+| 克莱因瓶地图注册与大厅标注（Task 17） | `maps/builtin.py`、`maps/__init__.py`、`web/app.js` | ✅ 已完成 |
+| 浸入正则性 / 自交 / 法向反向 / 跨缝连续性测试（Task 17） | `tests/test_klein_bottle.py` | ✅ 已完成 |
+| 打结环面关卡（管道沿 (p,q) 环面结，Task 18） | `src/the_curved_world/manifold.py`、`maps/builtin.py` | ✅ 已完成 |
+| 经典瓶形克莱因瓶浸入（Task 18） | `manifold.py`、`maps/builtin.py` | ✅ 已完成 |
+| 椭圆曲线关卡（共形模型，τ=i 实测，Task 18） | `manifold.py`、`maps/builtin.py` | ✅ 已完成 |
+| 实射影平面对跖世界（Task 18） | `manifold.py`、`maps/builtin.py` | ✅ 已完成 |
+| 可配置距离策略 `distance_mode`（orbit_min，Task 18） | `config.py`、`geometry.py`、`world.py`、`detector.py`、`gameplay.py`、`obstacles.py` | ✅ 已完成 |
+| 数据驱动的 chart 副本契约（`chart_copies` 下发，Task 18） | `manifold.py`、`server.py`、`web/app.js` | ✅ 已完成 |
+| 四张新地图的诚实性测试（公式比对 / 嵌入性 / 共形模数 / 轨道距离，Task 18） | `tests/test_knotted_torus.py`、`test_bottle_klein.py`、`test_elliptic_curve.py`、`test_projective_plane.py` | ✅ 已完成 |
 
 ## 安装、运行与测试
 
@@ -685,6 +918,16 @@ AI Empowered/
 - 探测器为确定性模型，**暂无**测量噪声（Task 1 明确暂不加入）。
 - 移动在参数空间进行，**不是**测地线运动或物理真实行走。
 - 曲面族为“正弦波 + 高斯丘”之和；不保证对任意用户提供的函数成立。
+- **克莱因瓶是浸入而非嵌入**：R³ 中必然自交，且不可定向，因此 (a) 自交圆上两个不同曲面点三维重合，
+  探测器与环境距离碰撞**无法区分**它们；(b) 没有全局“外侧”，`normal()` 只是局部一致的解析法向；
+  (c) 自交圆两侧各约 0.074 的薄带内，另一支曲面上的障碍物可能在**视口之外**却满足后端碰撞判据（详见 Task 17 小节）。
+- **打结环面同理但更极端**：结在嵌入里而不在拓扑里（χ 仍为 0）；两股表面最近约 12 而 `detector_scale = 30`，
+  所以探测器对两股读数几乎相同——这是设计意图，不是缺陷。
+- **椭圆曲线只是共形模型**：R³ 中不存在完备平坦闭曲面（Hilbert），本图曲率外正内负；"复分析"体现在
+  共形结构上，而不是某个全纯高度函数（紧黎曼曲面上不存在非常值全纯函数）。
+- **RP² 的距离必须取轨道最小**：`orbit_min` 是唯一改变距离语义的策略，只对 `projective_plane` 开启，
+  其余地图保持 `euclidean` 并有逐图回归测试。
+- **真亏格 2 仍缺**：`double_torus` 只是外观近似；真亏格 2 需要亏格 2 参数域或隐式曲面引擎（见「计划扩展」）。
 - 尚未实现（计划扩展）：测量噪声、键盘/鼠标事件回调、实时 3D 引擎替换、更复杂的曲面族。
 
 ## 演示与复现

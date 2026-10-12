@@ -529,9 +529,19 @@ class ExplorationGame:
         wrapped, _ = self._clamp((float(u), float(v)))
         du = wrapped[0] - previous[0]
         dv = wrapped[1] - previous[1]
-        if getattr(self._player.surface, "periodic", False):
-            du = wrap_parameter(du)
-            dv = wrap_parameter(dv)
+        surface = self._player.surface
+        if getattr(surface, "periodic", False):
+            # Ask the chart for the nearest representative instead of wrapping by a
+            # hardcoded 2 pi: the Klein bottle's u period is 4 pi and the
+            # projective plane has four sheets.
+            relative = getattr(surface, "chart_relative", None)
+            if callable(relative):
+                near = relative(previous[0], previous[1], wrapped[0], wrapped[1])
+                du = near[0] - previous[0]
+                dv = near[1] - previous[1]
+            else:  # pragma: no cover - defensive for duck-typed periodic surfaces
+                du = wrap_parameter(du)
+                dv = wrap_parameter(dv)
         if math.hypot(du, dv) > 1e-12:
             penalty = self.calculate_slope_penalty(previous[0], previous[1], du, dv)
             self._last_slope = penalty
@@ -619,11 +629,13 @@ class ExplorationGame:
             "excess": total - math.pi,
         }
     def distance_between_markers(self, name_a: str, name_b: str) -> float:
-        """Ambient (straight-line 3D) distance between two player-known markers.
+        """Distance between two player-known markers, under the world's policy.
 
         The hidden exit is never a valid endpoint because endpoints are marker
-        names only. This is the documented Euclidean distance, never a path
-        length along the surface.
+        names only. On the default policy this is the documented Euclidean
+        distance, never a path length along the surface; a quotient world
+        (projective plane) reports the distance between the *nearest*
+        realizations, because that is what "the same place" means there.
         """
         marker_a = self._markers.get(name_a)
         marker_b = self._markers.get(name_b)
@@ -631,9 +643,7 @@ class ExplorationGame:
             raise GameError(f"unknown marker {name_a!r}")
         if marker_b is None:
             raise GameError(f"unknown marker {name_b!r}")
-        return ambient_distance(
-            self._player.position(marker_a.position), self._player.position(marker_b.position)
-        )
+        return self._world.ambient_distance(marker_a.position, marker_b.position)
 
     def summary(self) -> GameSummary:
         """Victory summary; contains the seed so the world can be replayed."""
@@ -751,7 +761,10 @@ class ExplorationGame:
         x, y = self._position
         delta = 1e-3
         player_point = np.asarray(surface.position(x, y), dtype=float)
-        exit_point = np.asarray(self._world.exit_position(), dtype=float)
+        # Point at the nearest realization of the exit: on a quotient world the
+        # antipodal twin is the same place, and the far one is a red herring.
+        candidates = [np.asarray(point, dtype=float) for point in self._world.exit_realizations()]
+        exit_point = min(candidates, key=lambda point: float(np.linalg.norm(point - player_point)))
         direction = exit_point - player_point
         length = float(np.linalg.norm(direction))
         if length < 1e-9:
@@ -802,7 +815,14 @@ class ExplorationGame:
         if getattr(surface, "periodic", False):
             # Closed manifold: wrap the parameters instead of clamping. There is
             # no boundary wall, so a move never counts as clamped.
-            return (wrap_parameter(position[0]), wrap_parameter(position[1])), False
+            #
+            # The wrap goes through the surface itself, because the chart is not
+            # always the plain periodic square: the Klein bottle's 2*pi shift in
+            # u mirrors v, so it publishes (4*pi, 2*pi) instead. Wrapping by the
+            # published periods is exactly the identity on the surface, which is
+            # what keeps the player on the same 3D point across the seam.
+            wrapped = surface.wrap(position[0], position[1])
+            return (float(wrapped[0]), float(wrapped[1])), False
         domain = surface.domain
         x = min(max(position[0], domain.x_min), domain.x_max)
         y = min(max(position[1], domain.y_min), domain.y_max)
@@ -811,7 +831,9 @@ class ExplorationGame:
     def _update_victory(self) -> None:
         if self._won:
             return
-        distance = ambient_distance(self._world.position(self._position), self._world.exit_position())
+        # The world owns the distance policy (plain Euclidean everywhere except
+        # quotient worlds such as the antipodal projective plane).
+        distance = self._world.ambient_distance(self._position, self._world.exit)
         sealed = self._quest_manager is not None and not self._quest_manager.exit_unlocked
         capture = float(getattr(self._config, "effective_capture_radius", self._config.capture_radius))
         if distance <= capture:

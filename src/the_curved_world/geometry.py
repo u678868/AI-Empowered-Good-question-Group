@@ -15,7 +15,7 @@ from typing import Tuple
 
 import numpy as np
 
-from src.the_curved_world.config import SurfaceConfig
+from src.the_curved_world.config import DISTANCE_ORBIT_MIN, SurfaceConfig
 
 
 def ambient_distance(p, q) -> float:
@@ -28,6 +28,26 @@ def ambient_distance(p, q) -> float:
     a = np.asarray(p, dtype=float).reshape(3)
     b = np.asarray(q, dtype=float).reshape(3)
     return float(np.linalg.norm(a - b))
+
+
+def world_distance(surface, p, q, mode: str = "euclidean") -> float:
+    """Distance between two *places* in parameter space, under a distance policy.
+
+    ``"euclidean"`` (the default everywhere) measures the straight line between
+    the two 3D realizations the chart hands back. ``"orbit_min"`` minimises over
+    the chart copies of both places, which is what a quotient world needs: on the
+    real projective plane one place has two antipodal realizations, so the honest
+    distance to a target is the nearer of them. Surfaces without chart copies
+    (graph surfaces, the plain periodic models) fall back to Euclidean distance.
+    """
+    orbit = getattr(surface, "orbit_positions", None)
+    if mode != DISTANCE_ORBIT_MIN or not callable(orbit):
+        return ambient_distance(surface.position(*p), surface.position(*q))
+    best = float("inf")
+    for a in orbit(float(p[0]), float(p[1])):
+        for b in orbit(float(q[0]), float(q[1])):
+            best = min(best, float(np.linalg.norm(np.asarray(a, dtype=float) - np.asarray(b, dtype=float))))
+    return best
 
 
 class SmoothSurface:
