@@ -952,3 +952,11 @@ powershell
 
 - Python 3.13（虚拟环境 `.venv/`，基于本机 3.13.2 创建）
 - numpy、matplotlib（运行/可视化）、pytest（测试）
+
+## 统一地图能力与完整交互工具链
+
+- 9 张地图各自独立注册，并统一发布 `MapCapabilities`：移动、标记、绳索、量具、三角拉圆和任务系统。
+- 服务端与前端通过同一能力矩阵驱动工具，不再为单张地图写特殊分支。
+- 支持 Klein Bottle、传统 Klein Bottle、Knotted Torus、Elliptic Curve、Real Projective Plane 的 chart periods / chart copies / orbit-min 距离。
+- 跨地图测试验证：三角闭合与拉圆、量绳、节点距离、顶点角、角和、三角测量，以及适用任务链解锁出口后能够通关。
+- 当前全量测试：250 passed。

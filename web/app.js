@@ -31,6 +31,7 @@ const BASE_SPEED = 1.15;
 
 const state = {
   player: null,
+  capabilities: null,
   maps: [],
   selection: [],
   godVisible: false,
@@ -55,6 +56,10 @@ const state = {
   hoverNode: null,
   hitNodes: [],
   hitRopes: [],
+  hitCircumcircles: [],
+  hoverTriangle: null,
+  hoverPullKey: null,
+  pullAnimation: null,
   scaleFactor: 1,
   difficulty: 'easy',
   readings: 0,
@@ -99,10 +104,6 @@ function wrapParameter(value) {
   return ((value + Math.PI) % TWO_PI + TWO_PI) % TWO_PI - Math.PI;
 }
 
-// The kernel publishes how its chart identifies points. Plain periodic maps
-// (torus, ellipsoid, two-hole look) use (2*pi, 2*pi); the Klein bottle uses
-// (4*pi, 2*pi), because a 2*pi shift in u mirrors v there instead of being the
-// identity. Wrapping by these periods is always invisible on the surface.
 function chartPeriods() {
   const periods = state.player && state.player.chart_periods;
   return Array.isArray(periods) && periods.length === 2 ? periods : [TWO_PI, TWO_PI];
@@ -116,18 +117,12 @@ function wrapToPeriod(value, period) {
   return ((value + period / 2) % period + period) % period - period / 2;
 }
 
-// Affine chart copies, published by the kernel as [du, dv, flip_v] triples.
-// One copy for the plain periodic charts; a Klein bottle has two sheets and the
-// antipodal projective plane four. Fallbacks keep an older payload working.
 function chartCopyTransforms() {
   const published = state.player && state.player.chart_copies;
   if (Array.isArray(published) && published.length) return published;
   return isTwistedChart() ? [[0, 0, false], [TWO_PI, 0, true]] : [[0, 0, false]];
 }
 
-// Every chart copy of one surface point: (u + du, +-v + dv). On a Klein bottle
-// both sheets are the same 3D point; on the projective plane two of them are the
-// antipode -- the same *place*, on the far side of the covering sphere.
 function chartCopies(u, v) {
   return chartCopyTransforms().map((entry) => {
     const du = Number(entry[0]) || 0;
@@ -137,9 +132,6 @@ function chartCopies(u, v) {
   });
 }
 
-// Chart displacement from a reference point to a world position, choosing the
-// copy that is actually nearest. Without this, features would jump to the far
-// side of the map when the player crosses a seam.
 function chartDelta(u, v, refU, refV) {
   if (!(state.player && state.player.periodic)) return [u - refU, v - refV];
   const [periodU, periodV] = chartPeriods();
@@ -157,16 +149,16 @@ function chartDelta(u, v, refU, refV) {
   return best;
 }
 
-// Single-coordinate relative delta. Used for the player's own history and the
-// decorative parameter grid, which never change chart sheet.
+function lerpAngle(a, b, t) {
+  return a + wrapParameter(b - a) * t;
+}
+
+// Nearest representative of a single parameter axis. The axis argument is
+// required on twisted charts because u and v may have different periods.
 function relativeDelta(a, b, axis) {
   if (!(state.player && state.player.periodic)) return a - b;
   const periods = chartPeriods();
   return wrapToPeriod(a - b, axis === 'v' ? periods[1] : periods[0]);
-}
-
-function lerpAngle(a, b, t) {
-  return a + wrapParameter(b - a) * t;
 }
 
 function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
@@ -298,14 +290,16 @@ function metricAt(patch, u, v) {
 }
 
 // Bring an absolute parameter point into the linear frame of the patch, which
-// may straddle the periodic seam (and, on a twisted chart, the flip).
+// may straddle the periodic seam.
 function localize(patch, u, v) {
   const [i, j] = centerIndex(patch);
   const cu = patch.x[i];
   const cv = patch.y[j];
-  if (!(state.player && state.player.periodic)) return [u, v];
-  const [du, dv] = chartDelta(u, v, cu, cv);
-  return [cu + du, cv + dv];
+  if (state.player && state.player.periodic) {
+    const [du, dv] = chartDelta(u, v, cu, cv);
+    return [cu + du, cv + dv];
+  }
+  return [u, v];
 }
 
 // Bilinear height sample from the server's local patch (global z coordinate).
@@ -453,12 +447,12 @@ function resolveHardCollisions(fromUv, targetUv) {
   const p = state.player;
   if (!p || !p.patch) return { uv: targetUv.slice(), hit: false };
   const geometry = collisionGeometry(p.patch);
-  let offset = chartDelta(targetUv[0], targetUv[1], fromUv[0], fromUv[1]);
+  let offset = [relativeDelta(targetUv[0], fromUv[0], 'u'), relativeDelta(targetUv[1], fromUv[1], 'v')];
   let hit = false;
   for (let iteration = 0; iteration < 4; iteration += 1) {
     let adjusted = false;
     for (const obstacle of p.obstacles || []) {
-      const centre = chartDelta(obstacle.u, obstacle.v, fromUv[0], fromUv[1]);
+      const centre = [relativeDelta(obstacle.u, fromUv[0], 'u'), relativeDelta(obstacle.v, fromUv[1], 'v')];
       const reach = geometry.reachParam(obstacle);
       let dx = offset[0] - centre[0];
       let dy = offset[1] - centre[1];
@@ -601,8 +595,10 @@ function drawTopDownWorld() {
     const [du, dv] = chartDelta(u, v, phys[0], phys[1]);
     return [cx + du * scale, cy - dv * scale];
   };
+  state.mapView = { cx, cy, scale, phys: phys.slice() };
   state.hitNodes = [];
   state.hitRopes = [];
+  state.hitCircumcircles = [];
 
   if (!state.terrainCache || state.terrainCache.patch !== patch) {
     state.terrainCache = { patch, data: buildTerrain(patch) };
@@ -749,6 +745,11 @@ function drawTopDownWorld() {
   for (const rope of p.ropes || []) {
     const a = project(rope.a.position[0], rope.a.position[1]);
     const b = project(rope.b.position[0], rope.b.position[1]);
+    const visibleLimit = R + 110;
+    if (Math.hypot(a[0] - cx, a[1] - cy) > visibleLimit
+        || Math.hypot(b[0] - cx, b[1] - cy) > visibleLimit) {
+      continue;
+    }
     ctx.strokeStyle = 'rgba(10, 14, 20, 0.55)';
     ctx.lineWidth = 4;
     ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
@@ -766,6 +767,49 @@ function drawTopDownWorld() {
     ctx.font = '11px monospace';
     ctx.fillText(`${rope.length_3d.toFixed(1)}m`, mid[0] + 5, mid[1] - 4);
     state.hitRopes.push({ id: rope.id, a, b });
+  }
+
+  // 7b. game_task7: pulled circumcircles and the hovered triangle preview.
+  for (const circle of p.circumcircles || []) {
+    const points = (circle.samples || []).map((sample) => projectCircleSample(circle, sample)).filter(Boolean);
+    if (points.length < 3) continue;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.65)';
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    for (let index = 0; index < points.length; index += 1) {
+      if (index === 0) ctx.moveTo(points[index][0], points[index][1]);
+      else ctx.lineTo(points[index][0], points[index][1]);
+    }
+    ctx.closePath(); ctx.stroke();
+    const pullAge = state.pullAnimation ? (performance.now() - state.pullAnimation.started) / 1000 : 2.0;
+    const pullProgress = clamp(pullAge / 1.2, 0, 1);
+    ctx.strokeStyle = `rgba(255, 214, 102, ${0.35 + 0.60 * pullProgress})`;
+    ctx.lineWidth = 2.4 + 2.2 * (1 - pullProgress);
+    ctx.beginPath();
+    for (let index = 0; index < points.length; index += 1) {
+      if (index === 0) ctx.moveTo(points[index][0], points[index][1]);
+      else ctx.lineTo(points[index][0], points[index][1]);
+    }
+    ctx.closePath(); ctx.stroke();
+    const labelPoint = points[0];
+    ctx.fillStyle = 'rgba(255, 214, 102, 0.95)';
+    ctx.font = '11px monospace';
+    ctx.fillText(`Circumcircle: C = ${Number(circle.perimeter).toFixed(1)} m`, labelPoint[0] + 6, labelPoint[1] - 8);
+    state.hitCircumcircles.push({ id: circle.id, points });
+  }
+  if (state.ropeMode && state.hoverTriangle) {
+    const tri = state.hoverTriangle;
+    const circle = screenCircumcircle(tri.points[0], tri.points[1], tri.points[2]);
+    if (circle) {
+      ctx.save();
+      ctx.setLineDash([6, 6]);
+      ctx.strokeStyle = `rgba(120, 235, 255, ${0.72 + 0.22 * Math.sin(performance.now() * 0.006)})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(circle.center[0], circle.center[1], circle.radius, 0, TWO_PI);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   // 8. Placed markers above the terrain.
@@ -944,10 +988,9 @@ function drawGauge() {
 
 function drawGodView() {
   const canvas = el('god-canvas');
-  // Size the backing store to the panel and draw in CSS pixels (like the main
-  // map canvas). Previously this used the fixed 760x520 attribute size, which
-  // the browser then stretched to the panel width -- a visibly blurry mesh.
-  const { ctx, W, H } = frameCanvas(canvas);
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
   ctx.fillStyle = '#06080d';
   ctx.fillRect(0, 0, W, H);
 
@@ -982,10 +1025,6 @@ function drawGodView() {
   const sinY = Math.sin(state.yaw);
   const cosP = Math.cos(state.pitch);
   const sinP = Math.sin(state.pitch);
-  // Fill factor: coordinates are normalised so that unit = 1 / largest span, so
-  // |X|, |Y| <= 0.5 and |rx| <= 0.5 * (|cos| + |sin|) <= 0.707 for any yaw.
-  // 0.68 therefore uses ~68% of the canvas without ever clipping the surface.
-  const FILL = 0.68;
 
   const project = (x, y, z) => {
     const X = (x - centreX) * unit;
@@ -993,7 +1032,7 @@ function drawGodView() {
     const Z = (z - centreZ) * unit;
     const rx = X * cosY - Y * sinY;
     const ry = X * sinY + Y * cosY;
-    return [W / 2 + rx * W * FILL, H / 2 + (ry * sinP - Z * cosP) * H * FILL];
+    return [W / 2 + rx * W * 0.42, H / 2 + (ry * sinP - Z * cosP) * H * 0.42];
   };
 
   const nodes = new Array(nx * ny);
@@ -1005,8 +1044,8 @@ function drawGodView() {
       const rx = X * cosY - Y * sinY;
       const ry = X * sinY + Y * cosY;
       nodes[j * nx + i] = [
-        W / 2 + rx * W * FILL,
-        H / 2 + (ry * sinP - Z * cosP) * H * FILL,
+        W / 2 + rx * W * 0.42,
+        H / 2 + (ry * sinP - Z * cosP) * H * 0.42,
         ry * cosP + Z * sinP,
       ];
     }
@@ -1111,6 +1150,7 @@ function forwardParamAngle(p) {
 
 function applySnapshot(snapshot) {
   state.player = state.player ? Object.assign({}, state.player, snapshot) : snapshot;
+  state.capabilities = state.player.capabilities || state.capabilities;
   if (typeof state.player.scale_factor === 'number' && state.player.scale_factor > 0) {
     state.scaleFactor = state.player.scale_factor;
   }
@@ -1145,7 +1185,7 @@ function formatDuration(seconds) {
 function topologyLabel(mapId) {
   const entry = state.maps.find((item) => item.id === mapId);
   if (!entry) return '-';
-  if (entry.non_orientable) return 'closed periodic, non-orientable (immersed, self-intersecting)';
+  if (entry.non_orientable) return 'closed periodic, non-orientable (immersed)';
   if (entry.topology === 'closed_periodic') return 'closed periodic manifold';
   if (entry.topology === 'bounded_plane') return 'bounded plane';
   return entry.topology;
@@ -1186,12 +1226,30 @@ function renderQuest() {
   el('quest-title').textContent = quest.title || 'No active quest';
   el('quest-description').textContent = quest.description || '';
   el('quest-hint').textContent = quest.hint || '';
-  const target = quest.target_angle_sum_degrees;
-  const current = quest.current_angle_sum_degrees;
+  const fallbackTarget = quest.target_angle_sum_degrees;
+  const fallbackCurrent = quest.current_angle_sum_degrees;
+  const target = typeof quest.objective_target === 'number' ? quest.objective_target : fallbackTarget;
+  let current = typeof quest.objective_current === 'number' ? quest.objective_current : fallbackCurrent;
+  const label = quest.objective || 'Objective';
+  if (quest.id === 'homotopy_loop' && state.player && state.player.homotopy) {
+    current = Number(state.player.homotopy.phase_max_pi) || 0;
+  }
+  if (quest.id === 'parabolic_line' && typeof current !== 'number') current = 0;
   if (typeof target === 'number') {
-    el('quest-objective').textContent = quest.objective || 'Angle Sum';
-    const shown = typeof current === 'number' ? current.toFixed(1) : '-';
-    el('quest-progress-label').textContent = `Angle Sum: ${shown} / ${target.toFixed(1)} deg`;
+    el('quest-objective').textContent = label;
+    if (quest.objective_unit === 'ratio') {
+      const shown = typeof current === 'number' ? current.toFixed(4) : '-';
+      el('quest-progress-label').textContent = `${label}: ${shown} / ${target.toFixed(4)}`;
+    } else if (quest.objective_unit === 'count') {
+      const shown = typeof current === 'number' ? current.toFixed(0) : '-';
+      el('quest-progress-label').textContent = `Parabolic Pegs: ${shown} / ${target.toFixed(0)} (Tolerance: |K| <= 0.004)`;
+    } else if (quest.objective_unit === 'pi') {
+      const shown = typeof current === 'number' ? current.toFixed(3) : '-';
+      el('quest-progress-label').textContent = `Circumnavigation Phase: ${shown} pi / ${target.toFixed(2)} pi (Return to origin to seal)`;
+    } else {
+      const shown = typeof current === 'number' ? current.toFixed(1) : '-';
+      el('quest-progress-label').textContent = `${label}: ${shown} / ${target.toFixed(1)} deg`;
+    }
   } else {
     el('quest-objective').textContent = 'Objective';
     el('quest-progress-label').textContent = 'all seals claimed';
@@ -1199,6 +1257,128 @@ function renderQuest() {
   el('quest-bar-fill').style.width = `${Math.round(clamp(quest.progress || 0, 0, 1) * 100)}%`;
   el('quest-relics').textContent = relics.length ? `Relics: ${relics.join(', ')}` : '';
   el('quest-seal').classList.toggle('hidden', !quest.exit_sealed);
+  updateQuestActionButton();
+}
+
+function markerNames() {
+  return ((state.player && state.player.markers) || []).map((marker) => marker.name);
+}
+
+function updateQuestActionButton() {
+  const button = el('quest-action');
+  if (!button) return;
+  const quest = state.player && state.player.quest;
+  const id = quest && quest.id;
+  if (!id || !['holonomy_loop', 'parabolic_line', 'homotopy_loop'].includes(id)) {
+    button.classList.add('hidden');
+    return;
+  }
+  button.classList.remove('hidden');
+  if (id === 'holonomy_loop') {
+    const calibrated = Boolean(state.player.holonomy && state.player.holonomy.calibrated);
+    button.textContent = calibrated ? 'Measure Holonomy' : 'Calibrate Vector';
+    button.classList.toggle('ready', calibrated);
+  } else if (id === 'parabolic_line') {
+    button.textContent = 'Validate 3 Parabolic Pegs';
+    button.classList.remove('ready');
+  } else {
+    button.textContent = 'Seal Homotopy Loop';
+    button.classList.toggle('ready', Boolean(state.player.homotopy && state.player.homotopy.origin_label));
+  }
+}
+
+async function applyQuestMeasurement(result, progressText) {
+  if (!state.player) return;
+  if (result.holonomy) state.player = Object.assign({}, state.player, { holonomy: result.holonomy });
+  if (result.homotopy) state.player = Object.assign({}, state.player, { homotopy: result.homotopy });
+  if (result.quest) state.player = Object.assign({}, state.player, { quest: result.quest });
+  syncDetectorLock();
+  if (result.quest_completed && result.proof) {
+    state.shownRelicCount = ((result.quest && result.quest.relics) || []).length;
+    await refreshState();
+    showProof(result.proof);
+    hintMessage(`Quest complete - ${(result.proof && result.proof.relic) || 'the seal'} claimed!`, 'ok');
+    return;
+  }
+  await refreshState();
+  hintMessage(progressText || 'Measurement recorded. Continue the field procedure.', 'info');
+}
+
+async function runQuestAction() {
+  const player = state.player;
+  const quest = player && player.quest;
+  if (!quest) return;
+  try {
+    if (quest.id === 'holonomy_loop') {
+      const names = markerNames();
+      if (!names.length) {
+        hintMessage('Holonomy: place a marker A at the base point first.', 'warn');
+        return;
+      }
+      const calibrated = Boolean(player.holonomy && player.holonomy.calibrated);
+      const start = (player.holonomy && player.holonomy.start_label && names.includes(player.holonomy.start_label))
+        ? player.holonomy.start_label : names[0];
+      if (!calibrated) {
+        const result = await apiPost('/api/action/tool', {
+          tool: 'measure', mode: 'holonomy_calibrate', targets: [{ type: 'marker', id: start }],
+        });
+        state.player = Object.assign({}, state.player, { holonomy: result.holonomy });
+        renderAll();
+        hintMessage(`Parallel vector calibrated at ${result.marker}. Walk a closed loop, then measure it.`, 'ok');
+        return;
+      }
+      if (names.length < 3) {
+        hintMessage('Holonomy: place at least three ordered path markers around the loop.', 'warn');
+        return;
+      }
+      const selected = (state.selection || []).filter((name) => names.includes(name));
+      const targets = selected.length >= 3 ? selected : names.slice(-4);
+      const result = await apiPost('/api/action/tool', {
+        tool: 'measure', mode: 'holonomy', start, targets,
+      });
+      await applyQuestMeasurement(
+        result,
+        `Holonomy angle ${Number(result.abs_angle_degrees || 0).toFixed(2)} deg; keep the loop closed around the height.`
+      );
+      return;
+    }
+
+    if (quest.id === 'parabolic_line') {
+      const names = markerNames();
+      const selected = (state.selection || []).filter((name) => names.includes(name));
+      const targets = selected.length === 3 ? selected : names.slice(-3);
+      if (targets.length !== 3) {
+        hintMessage('Parabolic: place three pegs and connect them with ropes before validation.', 'warn');
+        return;
+      }
+      const result = await apiPost('/api/action/tool', {
+        tool: 'measure', mode: 'parabolic', targets,
+      });
+      await applyQuestMeasurement(
+        result,
+        `Parabolic pegs: ${((result.curvatures || []).length)} readings, minimum spacing ${Math.min(...(result.pairwise_distances || [0])).toFixed(3)} m.`
+      );
+      return;
+    }
+
+    if (quest.id === 'homotopy_loop') {
+      const origin = player.homotopy && player.homotopy.origin_label;
+      if (!origin) {
+        hintMessage('Homotopy: place the origin beacon O before circumnavigating.', 'warn');
+        return;
+      }
+      const result = await apiPost('/api/action/tool', {
+        tool: 'measure', mode: 'homotopy', origin,
+      });
+      const tracking = result.homotopy || {};
+      await applyQuestMeasurement(
+        result,
+        `Circumnavigation phase ${Number(tracking.phase_max_pi || 0).toFixed(3)} pi / 1.80 pi; return to O to seal.`
+      );
+    }
+  } catch (error) {
+    hintMessage(error.message, 'error');
+  }
 }
 
 let proofFrame = null;
@@ -1227,6 +1407,24 @@ function drawProofFrame(ctx, W, H, time) {
       if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.stroke();
+  }
+
+  const proofKind = ((state.proof || {}).kind) || 'gauss_bonnet_excess';
+  if (proofKind === 'bdp_circle_deficit') {
+    drawBdpProofFrame(ctx, W, H, time, state.proof || {});
+    return;
+  }
+  if (proofKind === 'holonomy_loop') {
+    drawHolonomyProofFrame(ctx, W, H, time, state.proof || {});
+    return;
+  }
+  if (proofKind === 'parabolic_line') {
+    drawParabolicProofFrame(ctx, W, H, time, state.proof || {});
+    return;
+  }
+  if (proofKind === 'homotopy_loop') {
+    drawHomotopyProofFrame(ctx, W, H, time, state.proof || {});
+    return;
   }
 
   const cx = W / 2;
@@ -1282,6 +1480,251 @@ function drawProofFrame(ctx, W, H, time) {
   if (typeof proof.target_degrees === 'number') {
     ctx.fillText(`target ${proof.target_degrees.toFixed(1)} deg`, 16, 42);
   }
+}
+
+
+function drawBdpProofFrame(ctx, W, H, time, proof) {
+  const detail = proof.detail || {};
+  const deficit = Math.max(0.0, Math.min(0.6, Number(detail.deficit) || 0.05));
+  const cx = W / 2;
+  const cy = H / 2 + 4;
+  const flatRadius = Math.min(W, H) * 0.34;
+  const pulse = 1 + 0.05 * Math.sin(time * 2.0);
+  const geodesicRadius = flatRadius * (1.0 - deficit) * pulse;
+
+  // Three pegs start as a triangle and visually expand toward the ring.
+  const expansion = 0.62 + 0.20 * (0.5 + 0.5 * Math.sin(time * 1.8));
+  const triangleRadius = geodesicRadius * expansion;
+  const triangle = [0, 1, 2].map((index) => {
+    const angle = -Math.PI / 2 + index * TWO_PI / 3;
+    return [cx + triangleRadius * Math.cos(angle), cy + triangleRadius * Math.sin(angle)];
+  });
+  ctx.save();
+  ctx.setLineDash([5, 5]);
+  ctx.strokeStyle = 'rgba(120, 235, 255, 0.9)';
+  ctx.lineWidth = 1.7;
+  ctx.beginPath();
+  ctx.moveTo(triangle[0][0], triangle[0][1]);
+  ctx.lineTo(triangle[1][0], triangle[1][1]);
+  ctx.lineTo(triangle[2][0], triangle[2][1]);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.setLineDash([]);
+  for (let index = 0; index < 3; index += 1) {
+    ctx.fillStyle = '#78ebff';
+    ctx.beginPath();
+    ctx.arc(triangle[index][0], triangle[index][1], 4, 0, TWO_PI);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  // Deficit shadow: the area that curvature removes from the flat circle.
+  ctx.fillStyle = `rgba(255, 214, 102, ${0.07 + 0.06 * Math.sin(time * 2.4)})`;
+  ctx.beginPath();
+  ctx.arc(cx, cy, flatRadius, 0, TWO_PI);
+  ctx.arc(cx, cy, geodesicRadius, 0, TWO_PI, true);
+  ctx.fill();
+
+  // Flat Euclidean reference circle (grey dashed).
+  ctx.setLineDash([7, 6]);
+  ctx.strokeStyle = 'rgba(205, 212, 224, 0.8)';
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.arc(cx, cy, flatRadius, 0, TWO_PI);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Golden geodesic ring (the rope ring shrinks inside the flat circle).
+  ctx.strokeStyle = `rgba(255, 214, 102, ${0.7 + 0.25 * Math.sin(time * 3)})`;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  const sides = 48;
+  for (let k = 0; k <= sides; k += 1) {
+    const angle = (2 * Math.PI * k) / sides;
+    const x = cx + geodesicRadius * Math.cos(angle);
+    const y = cy + geodesicRadius * Math.sin(angle);
+    if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+
+  // Radius spoke + center anchor.
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + geodesicRadius, cy);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#e0e7ff';
+  ctx.beginPath(); ctx.arc(cx, cy, 6, 0, TWO_PI); ctx.fill();
+  ctx.strokeStyle = `rgba(120, 210, 255, ${0.6 + 0.3 * Math.sin(time * 2)})`;
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, 10 + 3 * Math.sin(time * 2), 0, TWO_PI); ctx.stroke();
+
+  ctx.fillStyle = 'rgba(232, 242, 228, 0.85)';
+  ctx.font = '13px monospace';
+  if (typeof detail.perimeter === 'number') {
+    ctx.fillText(`geodesic C = ${detail.perimeter.toFixed(2)} m`, 16, 24);
+  }
+  if (typeof detail.circle_perimeter === 'number') {
+    ctx.fillText(`flat 2*pi*r = ${detail.circle_perimeter.toFixed(2)} m`, 16, 42);
+  }
+  if (typeof detail.ratio === 'number' && typeof detail.target_ratio === 'number') {
+    ctx.fillText(`ratio ${detail.ratio.toFixed(4)} / target ${detail.target_ratio.toFixed(4)}`, 16, 60);
+  }
+  if (Array.isArray(detail.triangle_labels) && detail.triangle_labels.length === 3) {
+    ctx.fillText(`pegs ${detail.triangle_labels.join(' / ')}`, 16, 78);
+  }
+}
+
+function drawHolonomyProofFrame(ctx, W, H, time, proof) {
+  const detail = proof.detail || {};
+  const cx = W / 2;
+  const cy = H / 2 + 8;
+  const radius = Math.min(W, H) * 0.28;
+  const count = 10;
+  const points = [];
+  for (let k = 0; k < count; k += 1) {
+    const angle = -Math.PI / 2 + 2 * Math.PI * k / count;
+    points.push([cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)]);
+  }
+  ctx.fillStyle = 'rgba(77, 171, 247, 0.10)';
+  ctx.beginPath();
+  points.forEach((point, index) => {
+    if (index === 0) ctx.moveTo(point[0], point[1]);
+    else ctx.lineTo(point[0], point[1]);
+  });
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = `rgba(255, 214, 102, ${0.72 + 0.22 * Math.sin(time * 3)})`;
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  const angle = Number(detail.holonomy_angle) || 0;
+  const start = points[0];
+  const endAngle = -Math.PI / 2 + angle;
+  const end = [cx + radius * 0.72 * Math.cos(endAngle), cy + radius * 0.72 * Math.sin(endAngle)];
+  ctx.strokeStyle = '#78d6ff';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(start[0], start[1]); ctx.stroke();
+  ctx.strokeStyle = '#ffd166';
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(end[0], end[1]); ctx.stroke();
+  ctx.fillStyle = '#e0e7ff';
+  ctx.beginPath(); ctx.arc(cx, cy, 5, 0, TWO_PI); ctx.fill();
+  ctx.fillStyle = 'rgba(232, 242, 228, 0.85)';
+  ctx.font = '13px monospace';
+  if (typeof detail.holonomy_degrees === 'number') {
+    ctx.fillText(`transport rotation = ${detail.holonomy_degrees.toFixed(2)} deg`, 16, 24);
+  }
+  if (typeof detail.target_degrees === 'number') {
+    ctx.fillText(`target >= ${detail.target_degrees.toFixed(2)} deg`, 16, 42);
+  }
+  ctx.fillText('v_start', start[0] + 8, start[1] - 8);
+  ctx.fillText('v_end', end[0] + 8, end[1] - 8);
+}
+
+function drawParabolicProofFrame(ctx, W, H, time, proof) {
+  const detail = proof.detail || {};
+  const cx = W / 2;
+  const cy = H / 2 + 18;
+  const sx = 3.4;
+  const sy = 2.3;
+  ctx.lineWidth = 1;
+  for (let i = -5; i <= 5; i += 1) {
+    ctx.strokeStyle = 'rgba(120, 160, 200, 0.22)';
+    ctx.beginPath();
+    for (let j = -5; j <= 5; j += 0.25) {
+      const x = cx + i * 18 + j * 2.2;
+      const y = cy + j * 9 - (i * i - j * j) * 0.13;
+      if (j === -5) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.beginPath();
+    for (let j = -5; j <= 5; j += 0.25) {
+      const x = cx + j * 18 + i * 2.2;
+      const y = cy + i * 9 - (j * j - i * i) * 0.13;
+      if (j === -5) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.strokeStyle = `rgba(77, 235, 235, ${0.7 + 0.25 * Math.sin(time * 2.6)})`;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let j = -5; j <= 5; j += 0.08) {
+    const x = cx + j * 24;
+    const y = cy + j * 11 - (0.35 * j * j - 0.35 * j * j) * 0.0;
+    if (j === -5) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  const labels = detail.labels || ['P1', 'P2', 'P3'];
+  labels.slice(0, 3).forEach((label, index) => {
+    const x = cx - 150 + index * 150;
+    const y = cy + Math.sin(index * 1.4 + time) * 20;
+    ctx.fillStyle = 'rgba(77, 235, 235, 0.95)';
+    ctx.beginPath(); ctx.arc(x, y, 5, 0, TWO_PI); ctx.fill();
+    ctx.fillStyle = '#e0e7ff';
+    ctx.font = '12px monospace';
+    ctx.fillText(String(label), x + 8, y - 8);
+  });
+  ctx.fillStyle = 'rgba(232, 242, 228, 0.85)';
+  ctx.font = '13px monospace';
+  const tolerance = Number(detail.tolerance) || 0.004;
+  ctx.fillText(`parabolic band |K| <= ${tolerance.toFixed(6)}`, 16, 24);
+  ctx.fillText(`confirmed pegs = ${Number(detail.valid_pegs) || 0} / 3`, 16, 42);
+}
+
+function drawHomotopyProofFrame(ctx, W, H, time, proof) {
+  const detail = proof.detail || {};
+  const cx = W / 2;
+  const cy = H / 2 + 18;
+  const R = 112;
+  const r = 42;
+  ctx.lineWidth = 1.2;
+  for (let u = 0; u < TWO_PI; u += Math.PI / 10) {
+    ctx.strokeStyle = 'rgba(120, 210, 255, 0.16)';
+    ctx.beginPath();
+    for (let v = 0; v <= TWO_PI + 0.1; v += 0.16) {
+      const rr = R + r * Math.cos(v);
+      const x = cx + rr * Math.cos(u);
+      const y = cy + rr * Math.sin(u) * 0.56 - r * Math.sin(v) * 0.72;
+      if (v === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  for (let v = 0; v < TWO_PI; v += Math.PI / 6) {
+    ctx.strokeStyle = 'rgba(120, 210, 255, 0.14)';
+    ctx.beginPath();
+    for (let u = 0; u <= TWO_PI + 0.1; u += 0.16) {
+      const rr = R + r * Math.cos(v);
+      const x = cx + rr * Math.cos(u);
+      const y = cy + rr * Math.sin(u) * 0.56 - r * Math.sin(v) * 0.72;
+      if (u === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  const pulse = 0.5 + 0.5 * Math.sin(time * 2.2);
+  ctx.strokeStyle = `rgba(255, 214, 102, ${0.58 + 0.38 * pulse})`;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let a = 0; a <= TWO_PI + 0.12; a += 0.12) {
+    const rr = R + r * Math.cos(a);
+    const x = cx + rr * Math.cos(a);
+    const y = cy + rr * Math.sin(a) * 0.56 - r * Math.sin(a) * 0.72;
+    if (a === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(255, 120, 120, 0.85)';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, R - r * 0.6, 0, TWO_PI); ctx.stroke();
+  ctx.fillStyle = 'rgba(232, 242, 228, 0.85)';
+  ctx.font = '13px monospace';
+  const phase = Number(detail.phase_max_pi);
+  if (Number.isFinite(phase)) ctx.fillText(`phase = ${phase.toFixed(3)} pi`, 16, 24);
+  if (Number.isFinite(Number(detail.winding_max))) {
+    ctx.fillText(`winding = ${Number(detail.winding_max).toFixed(3)}`, 16, 42);
+  }
+  ctx.fillText('the central hole blocks contraction', 16, H - 18);
 }
 
 function startProofAnimation() {
@@ -1630,10 +2073,7 @@ async function runTool(tool) {
 
 async function setGodView(visible) {
   if (Boolean(visible) === Boolean(state.godVisible)) {
-    // Already in the requested state -- but re-read the privileged state anyway.
-    // The lobby can rebuild the world underneath us, and redrawing the cached
-    // payload would silently leave the *previous* map's mesh on screen.
-    if (state.godVisible) await refreshGodView();
+    if (state.godVisible) drawGodView();
     return;
   }
   await toggleGodView();
@@ -1643,17 +2083,6 @@ async function toggleGodView() {
   state.godVisible = !state.godVisible;
   el('god-panel').classList.toggle('hidden', !state.godVisible);
   el('mode').textContent = state.godVisible ? 'god view (debug)' : 'top-down map';
-  if (!state.godVisible) return;
-  // The privileged panel sits below the local map, so bring it into view --
-  // otherwise the 3D mesh is drawn but stays off-screen. Scrolling is instant
-  // on purpose: the view must be there the moment the toggle is pressed.
-  el('god-panel').scrollIntoView({ behavior: 'auto', block: 'start' });
-  await refreshGodView();
-}
-
-// Fetch the privileged state and redraw. This is deliberately always a fresh
-// request: the god view must never show a mesh that belongs to another world.
-async function refreshGodView() {
   if (!state.godVisible) return;
   try {
     state.debugState = await apiGet('/api/state/debug');
@@ -1752,9 +2181,6 @@ async function enterWorld() {
     PHYS.uv = null;
     PHYS.dirty = false;
     PHYS.hitFlash = 0;
-    // Drop the privileged cache with the old world so nothing stale can be
-    // redrawn; setGodView() below re-reads it for the new session.
-    state.debugState = null;
     await refreshState();
     hideLobby();
     await setGodView(mode === 'god');
@@ -1782,6 +2208,7 @@ function selectSlot(slot) {
   }
   const capsule = el('measure-mode');
   if (capsule) capsule.classList.toggle('hidden', !state.measureMode);
+  updateQuestActionButton();
   const label = document.querySelector(`.hotbar .slot[data-slot="${state.slot}"] span`);
   const name = label ? label.textContent : '';
   if (state.ropeMode) {
@@ -1859,6 +2286,20 @@ function nearestNode(x, y) {
       best = { node, distance };
     }
   }
+  if (best) return best.node;
+  // Fallback for angle/path clicks: marker hit-caches can be one frame stale
+  // after a canvas resize or a position sync. Project directly from markers.
+  for (const marker of (state.player && state.player.markers) || []) {
+    const point = projectMarkerForPull(marker);
+    if (!point) continue;
+    const distance = Math.hypot(point[0] - x, point[1] - y);
+    if (distance <= 22 && (!best || distance < best.distance)) {
+      best = {
+        node: { type: 'marker', id: marker.name, label: marker.name, x: point[0], y: point[1], r: 22 },
+        distance,
+      };
+    }
+  }
   return best ? best.node : null;
 }
 
@@ -1869,6 +2310,137 @@ function pointSegmentDistance(px, py, a, b) {
   if (lengthSq < 1e-9) return Math.hypot(px - a[0], py - a[1]);
   const t = clamp(((px - a[0]) * dx + (py - a[1]) * dy) / lengthSq, 0, 1);
   return Math.hypot(px - (a[0] + t * dx), py - (a[1] + t * dy));
+}
+
+function pointInTriangle(x, y, a, b, c) {
+  const sign = (p1, p2, p3) => (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1]);
+  const d1 = sign([x, y], a, b);
+  const d2 = sign([x, y], b, c);
+  const d3 = sign([x, y], c, a);
+  const hasNegative = d1 < 0 || d2 < 0 || d3 < 0;
+  const hasPositive = d1 > 0 || d2 > 0 || d3 > 0;
+  return !(hasNegative && hasPositive);
+}
+
+function screenCircumcircle(a, b, c) {
+  const d = 2 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]));
+  if (Math.abs(d) < 1e-6) return null;
+  const aa = a[0] * a[0] + a[1] * a[1];
+  const bb = b[0] * b[0] + b[1] * b[1];
+  const cc = c[0] * c[0] + c[1] * c[1];
+  const center = [
+    (aa * (b[1] - c[1]) + bb * (c[1] - a[1]) + cc * (a[1] - b[1])) / d,
+    (aa * (c[0] - b[0]) + bb * (a[0] - c[0]) + cc * (b[0] - a[0])) / d,
+  ];
+  return { center, radius: Math.hypot(center[0] - a[0], center[1] - a[1]) };
+}
+
+function projectMarkerForPull(marker) {
+  const view = state.mapView;
+  if (!view) return null;
+  const [du, dv] = chartDelta(
+    marker.position[0], marker.position[1], view.phys[0], view.phys[1]
+  );
+  return [
+    view.cx + du * view.scale,
+    view.cy - dv * view.scale,
+  ];
+}
+
+function projectCircleSample(circle, sample) {
+  const view = state.mapView;
+  if (!view || !circle || !circle.center) return null;
+  const [centerDu, centerDv] = chartDelta(
+    circle.center[0], circle.center[1], view.phys[0], view.phys[1]
+  );
+  const periods = chartPeriods();
+  const localU = wrapToPeriod(sample[0] - circle.center[0], periods[0]);
+  const localV = wrapToPeriod(sample[1] - circle.center[1], periods[1]);
+  return [
+    view.cx + (centerDu + localU) * view.scale,
+    view.cy - (centerDv + localV) * view.scale,
+  ];
+}
+
+function pullableTriangleAt(x, y) {
+  const p = state.player;
+  if (!p || !state.mapView) return null;
+  const markers = (p.markers || []).map((marker) => {
+    const point = projectMarkerForPull(marker);
+    return point ? { type: 'marker', id: marker.name, label: marker.name, x: point[0], y: point[1] } : null;
+  }).filter(Boolean);
+  for (let i = 0; i < markers.length; i += 1) {
+    for (let j = i + 1; j < markers.length; j += 1) {
+      for (let k = j + 1; k < markers.length; k += 1) {
+        const a = markers[i];
+        const b = markers[j];
+        const c = markers[k];
+        if (!findRopeBetween(a, b) || !findRopeBetween(b, c) || !findRopeBetween(c, a)) continue;
+        const points = [[a.x, a.y], [b.x, b.y], [c.x, c.y]];
+        const inside = pointInTriangle(x, y, points[0], points[1], points[2]);
+        const edgeNear = Math.min(
+          pointSegmentDistance(x, y, points[0], points[1]),
+          pointSegmentDistance(x, y, points[1], points[2]),
+          pointSegmentDistance(x, y, points[2], points[0]),
+        ) <= 22;
+        if (inside || edgeNear) {
+          return { labels: [a.id, b.id, c.id], points };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function nearestCircumcircle(x, y) {
+  let best = null;
+  for (const circle of state.hitCircumcircles || []) {
+    for (let index = 0; index < circle.points.length; index += 1) {
+      const a = circle.points[index];
+      const b = circle.points[(index + 1) % circle.points.length];
+      const distance = pointSegmentDistance(x, y, a, b);
+      if (distance <= 16 && (!best || distance < best.distance)) best = { circle, distance };
+    }
+  }
+  return best ? best.circle : null;
+}
+
+async function pullCircumcircle(labels) {
+  try {
+    const result = await apiPost('/api/action/tool', {
+      tool: 'rope_pull_circumcircle',
+      markers: labels,
+    });
+    applyRopeState(result);
+    state.hoverTriangle = null;
+    state.pullAnimation = { started: performance.now(), labels: labels.slice() };
+    renderAll();
+    if (result.quest_completed && result.proof) {
+      state.player = Object.assign({}, state.player, { quest: result.quest });
+      state.shownRelicCount = (result.quest.relics || []).length;
+      syncDetectorLock();
+      await refreshState();
+      showProof(result.proof);
+      hintMessage(`Quest complete - ${result.proof.relic} claimed!`, 'ok');
+    } else {
+      hintMessage(
+        `Circumcircle pulled: C_real = ${Number(result.circumcircle.perimeter).toFixed(1)} m, ` +
+        `C_flat = ${Number(result.circumcircle.flat_perimeter).toFixed(1)} m.`,
+        'ok'
+      );
+    }
+  } catch (error) {
+    const message = String((error && error.message) || error || '');
+    if (message.toLowerCase().includes('unknown tool')) {
+      hintMessage(
+        'The running server does not have the circle-pull endpoint. Restart the Python server, then press Ctrl+F5.',
+        'error',
+        true
+      );
+    } else {
+      hintMessage(message, 'error');
+    }
+  }
 }
 
 function nearestRope(eventOrX, y) {
@@ -1891,6 +2463,16 @@ function handleMapClick(event) {
   const x = event.clientX - rect.left;
   const y = event.clientY - rect.top;
   state.cursor = [x, y];
+  // Angle measurement must win over circumcircle pulling: clicking a vertex
+  // in Angle mode should measure its rope angle, not pull the BDP circle.
+  const pullMode = state.ropeMode || (state.measureMode && state.measureKind === 'length');
+  if (pullMode) {
+    const pull = pullableTriangleAt(x, y);
+    if (pull) {
+      pullCircumcircle(pull.labels);
+      return;
+    }
+  }
   if (state.ropeMode) {
     handleRopeClick(x, y);
     return;
@@ -1906,6 +2488,7 @@ function applyRopeState(result) {
   if (!state.player) return;
   state.player = Object.assign({}, state.player, {
     ropes: result.ropes || [],
+    circumcircles: result.circumcircles || [],
     rope_remaining: result.rope_remaining,
     rope_used: result.rope_used,
     rope_total: result.rope_total,
@@ -1957,6 +2540,11 @@ async function clearRopes() {
 }
 
 function handleRopeClick(x, y) {
+  const pull = pullableTriangleAt(x, y);
+  if (pull) {
+    pullCircumcircle(pull.labels);
+    return;
+  }
   if (!state.ropeFirst) {
     const node = nearestNode(x, y);
     if (!node) {
@@ -1984,10 +2572,11 @@ function handleRopeClick(x, y) {
 function setMeasureKind(kind) {
   state.measureKind = kind === 'angle' ? 'angle' : 'length';
   state.measureTargets = [];
-  for (const button of document.querySelectorAll('#measure-mode button')) {
+  for (const button of document.querySelectorAll('#measure-mode button[data-mode]')) {
     button.classList.toggle('active', button.dataset.mode === state.measureKind);
   }
   if (state.slot !== 4) selectSlot(4);
+  updateQuestActionButton();
   hintMessage(
     state.measureKind === 'angle'
       ? 'Angle: pick a path point bound to exactly two ropes (or three markers for a triangle).'
@@ -2007,6 +2596,29 @@ function countRopesAt(node) {
 
 async function handleMeasureClick(x, y) {
   if (state.measureKind === 'length') {
+    const circumcircle = nearestCircumcircle(x, y);
+    if (circumcircle) {
+      try {
+        const result = await apiPost('/api/action/tool', {
+          tool: 'measure',
+          mode: 'ruler',
+          targets: [{ type: 'circumcircle', id: circumcircle.id }],
+        });
+        if (result.quest_completed && result.proof) {
+          state.player = Object.assign({}, state.player, { quest: result.quest });
+          state.shownRelicCount = (result.quest.relics || []).length;
+          syncDetectorLock();
+          await refreshState();
+          showProof(result.proof);
+          hintMessage(`Quest complete - ${result.proof.relic} claimed!`, 'ok');
+        } else {
+          hintMessage(`Circumcircle length: ${result.distance.toFixed(2)} m.`, 'ok');
+        }
+      } catch (error) {
+        hintMessage(error.message, 'error');
+      }
+      return;
+    }
     const rope = nearestRope(x, y);
     if (!rope) {
       hintMessage('Length: click a rope to measure it.', 'warn');
@@ -2070,7 +2682,7 @@ async function handleMeasureClick(x, y) {
         syncDetectorLock();
         await refreshState();
         showProof(summed.proof);
-        hintMessage('Quest complete - the Curvature Seal is yours!', 'ok');
+        hintMessage(`Quest complete - ${(summed.proof && summed.proof.relic) || 'the seal'} claimed!`, 'ok');
       } else if (summed.quest) {
         state.player = Object.assign({}, state.player, { quest: summed.quest });
         syncDetectorLock();
@@ -2105,7 +2717,7 @@ async function handleMeasureClick(x, y) {
       syncDetectorLock();
       await refreshState();
       showProof(result.proof);
-      hintMessage('Quest complete - the Curvature Seal is yours!', 'ok');
+      hintMessage(`Quest complete - ${(result.proof && result.proof.relic) || 'the seal'} claimed!`, 'ok');
     } else {
       if (result.quest) {
         state.player = Object.assign({}, state.player, { quest: result.quest });
@@ -2132,11 +2744,29 @@ function renderCodex() {
   el('codex-quest-title').textContent = quest.title || 'No active quest';
   el('codex-quest-description').textContent = quest.description || '';
   el('codex-quest-hint').textContent = quest.hint ? `Hint: ${quest.hint}` : '';
-  const target = quest.target_angle_sum_degrees;
-  const current = quest.current_angle_sum_degrees;
-  el('codex-progress').textContent = typeof target === 'number'
-    ? `Angle Sum ${typeof current === 'number' ? current.toFixed(1) : '-'} / ${target.toFixed(1)} deg (${Math.round((quest.progress || 0) * 100)}%)`
-    : 'All geometric seals claimed';
+  const fallbackTarget = quest.target_angle_sum_degrees;
+  const fallbackCurrent = quest.current_angle_sum_degrees;
+  const target = typeof quest.objective_target === 'number' ? quest.objective_target : fallbackTarget;
+  const current = typeof quest.objective_current === 'number' ? quest.objective_current : fallbackCurrent;
+  const label = quest.objective || 'Objective';
+  if (typeof target === 'number') {
+    const shown = typeof current === 'number'
+      ? (quest.objective_unit === 'ratio' ? current.toFixed(4) : current.toFixed(1))
+      : '-';
+    if (quest.objective_unit === 'count') {
+      el('codex-progress').textContent =
+        `${label} ${shown} / ${target.toFixed(0)} (${Math.round((quest.progress || 0) * 100)}%)`;
+    } else if (quest.objective_unit === 'pi') {
+      el('codex-progress').textContent =
+        `${label} ${shown} / ${target.toFixed(2)} pi (${Math.round((quest.progress || 0) * 100)}%)`;
+    } else {
+      const suffix = quest.objective_unit === 'ratio' ? '' : ' deg';
+      el('codex-progress').textContent =
+        `${label} ${shown} / ${target.toFixed(quest.objective_unit === 'ratio' ? 4 : 1)}${suffix} (${Math.round((quest.progress || 0) * 100)}%)`;
+    }
+  } else {
+    el('codex-progress').textContent = 'All geometric seals claimed';
+  }
   const relics = quest.relics || [];
   el('codex-relics').innerHTML = relics.length
     ? relics.map((relic) => `&#9670; ${relic}`).join('<br />')
@@ -2145,6 +2775,14 @@ function renderCodex() {
 
 window.addEventListener('keydown', (event) => {
   const key = event.key.toLowerCase();
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const targetTag = String((event.target && event.target.tagName) || '').toLowerCase();
+  if (['input', 'select', 'textarea'].includes(targetTag)) return;
+  if (key === 'e' && (state.ropeMode || (state.measureMode && state.measureKind === 'length')) && state.hoverTriangle) {
+    event.preventDefault();
+    pullCircumcircle(state.hoverTriangle.labels);
+    return;
+  }
   if (MOVE_KEYS.includes(key) || key === 'q' || key === 'e') {
     keysDown.add(key);
     event.preventDefault();
@@ -2197,6 +2835,12 @@ mapCanvas.addEventListener('mousemove', (event) => {
   const localY = event.clientY - rect.top;
   state.cursor = [localX, localY];
   state.hoverNode = nearestNode(localX, localY);
+  const previousPull = state.hoverTriangle;
+  const pullMode = state.ropeMode || (state.measureMode && state.measureKind === 'length');
+  state.hoverTriangle = pullMode ? pullableTriangleAt(localX, localY) : null;
+  if (state.hoverTriangle && (!previousPull || previousPull.labels.join('|') !== state.hoverTriangle.labels.join('|'))) {
+    hintMessage('[Press E or Click to Pull into Circle]', 'ok');
+  }
   const x = localX - rect.width / 2;
   const y = localY - rect.height / 2;
   if (Math.hypot(x, y) < 12) return;
@@ -2208,10 +2852,11 @@ mapCanvas.addEventListener('contextmenu', (event) => {
   const rope = nearestRope(event, true);
   if (rope) askCut(rope.id);
 });
-for (const button of document.querySelectorAll('#measure-mode button')) {
+for (const button of document.querySelectorAll('#measure-mode button[data-mode]')) {
   button.addEventListener('click', () => setMeasureKind(button.dataset.mode));
 }
 el('codex-close').addEventListener('click', () => toggleCodex(false));
+el('quest-action').addEventListener('click', runQuestAction);
 
 const godCanvas = el('god-canvas');
 godCanvas.addEventListener('mousedown', (event) => {

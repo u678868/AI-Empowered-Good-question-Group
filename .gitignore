@@ -1,9 +1,32 @@
+# 虚拟环境
 .venv/
 venv/
+env/
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+
+# 临时目录
+temp/*
+!temp/.gitkeep
+
+# 编辑器 / 系统
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
+
+# 打包产物（生成物，由 scripts/package_submission.py 生成）
+submission/
+submission.zip
+
+# 过程记录与报告（无需纳入版本管理）
+process/
+report/

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from src.the_curved_world.config import ConfigError, WorldConfig
+from src.the_curved_world.maps.map_capabilities import MapCapabilities
 
 CLOSED_PERIODIC = "closed_periodic"
 BOUNDED_PLANE = "bounded_plane"
@@ -53,6 +54,7 @@ class MapMetadata:
     #: True for a non-orientable world (the Klein bottle): it has no global
     #: "outside" and cannot be embedded in R^3 without self-intersection.
     non_orientable: bool = False
+    capabilities: MapCapabilities = field(default_factory=MapCapabilities)
 
     def to_dict(self) -> Dict[str, Any]:
         """JSON-safe view (the callable factory is deliberately omitted)."""
@@ -63,6 +65,7 @@ class MapMetadata:
             "topology": self.topology,
             "periodic": self.topology == CLOSED_PERIODIC,
             "non_orientable": bool(self.non_orientable),
+            "capabilities": self.capabilities.to_dict(),
             "placement": dict(self.placement),
             "genus": self.genus,
         }
@@ -123,6 +126,7 @@ def register_map(
     placement: Optional[Dict[str, float]] = None,
     genus: Optional[int] = None,
     non_orientable: bool = False,
+    capabilities: MapCapabilities | None = None,
 ):
     """Class/function decorator that registers a map factory.
 
@@ -142,6 +146,7 @@ def register_map(
                 placement=dict(placement or {}),
                 genus=genus,
                 non_orientable=bool(non_orientable),
+                capabilities=capabilities or MapCapabilities(),
             )
         )
         return target
