@@ -266,7 +266,7 @@ class GameSession:
             # placeholder. Both return a neutral reading with no distance cue.
             return {
                 "signal": 0.0,
-                "label": "Offline" if self.difficulty == "medium" else "Reserved",
+                "label": "Offline",
                 "trend": "same",
             }
         if self._game.detector_locked:
@@ -280,12 +280,16 @@ class GameSession:
         }
 
     def _scoring_payload(self) -> Dict[str, Any]:
-        """Task 17: reserved scoring inputs; score itself is 0 until a formula lands."""
+        """Task 27: complete score ledger and scholar rank for the player payload."""
+        score_payload = self._game.calculate_score()
         return {
             "scale_factor": _round(self.scale_factor),
             "difficulty": self.difficulty,
-            "difficulty_reserved": self.difficulty == "hard",
-            "score": _round(self._game.score),
+            "difficulty_reserved": False,
+            "difficulty_active": self.difficulty == "hard",
+            "score": int(score_payload["total_score"]),
+            "rank": score_payload["rank"],
+            "score_breakdown": score_payload,
             "effective_steps": _round(self._game.effective_steps),
             "tool_usages": {key: int(value) for key, value in self._game.tool_usages.items()},
         }
@@ -574,6 +578,12 @@ class GameSession:
             "right_3d": [_round(v) for v in game.frame()["right"]],
             "up_3d": [_round(v) for v in game.frame()["up"]],
             "elapsed_time": _round(game.elapsed_time),
+            "max_markers_allowed": int(game.max_markers_allowed),
+            "marker_count": len(game.markers),
+            "time_limit": None if game.quest_time_limit is None else _round(game.quest_time_limit),
+            "time_remaining": None if game.quest_time_remaining is None else _round(game.quest_time_remaining),
+            "is_time_expired": bool(game.is_time_expired),
+            "defeated": bool(game.defeated),
             "won": bool(game.won),
             "detector_locked": bool(game.detector_locked),
             "quest": game.quest_state(),
@@ -704,6 +714,10 @@ class GameSession:
             "obstacles": self._visible_obstacles(patch, result.position),
             "detector_locked": bool(self._game.detector_locked),
             "quest": self._game.quest_state(),
+            "time_limit": None if self._game.quest_time_limit is None else _round(self._game.quest_time_limit),
+            "time_remaining": None if self._game.quest_time_remaining is None else _round(self._game.quest_time_remaining),
+            "is_time_expired": bool(self._game.is_time_expired),
+            "defeated": bool(self._game.defeated),
             **self._game.rope_state(),
             **self._scoring_payload(),
             **self._observation_payload(),
@@ -1115,7 +1129,7 @@ class GameSession:
                     "ok": True,
                     "tool": "scan",
                     "signal": 0.0,
-                    "label": "Offline" if self.difficulty == "medium" else "Reserved",
+                    "label": "Offline",
                     "trend": "same",
                     "readings": len(game.log),
                 }

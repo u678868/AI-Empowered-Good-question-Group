@@ -13,12 +13,13 @@ a geodesic walk and not a physically realistic simulation.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.the_curved_world.config import ConfigError
+from src.the_curved_world.config import ConfigError, hard_mode_time_limit
 from src.the_curved_world.geometry import ambient_distance
 from src.the_curved_world.manifold import wrap_parameter
 from src.the_curved_world.quest import (
@@ -84,6 +85,8 @@ class GameplayConfig:
     # Task 17: geometric scale S and difficulty tier (easy / medium / hard).
     scale_factor: float = 1.0
     difficulty: str = "easy"
+    max_rope_pool: float = 1_000_000.0
+    max_markers: int = 0
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -106,6 +109,13 @@ class GameplayConfig:
             raise ConfigError("GameplayConfig.scale_factor must be within [0.2, 10.0]")
         if str(self.difficulty).strip().lower() not in ("easy", "medium", "hard"):
             raise ConfigError("GameplayConfig.difficulty must be one of easy/medium/hard")
+        if not np.isfinite(float(self.max_rope_pool)) or float(self.max_rope_pool) <= 0.0:
+            raise ConfigError("GameplayConfig.max_rope_pool must be finite and > 0")
+        if int(self.max_markers) < 0:
+            raise ConfigError("GameplayConfig.max_markers must be >= 0")
+        if str(self.difficulty).strip().lower() == "hard":
+            object.__setattr__(self, "max_rope_pool", min(float(self.max_rope_pool), 500.0))
+            object.__setattr__(self, "max_markers", min(int(self.max_markers) or 8, 8))
         if int(self.max_pointer_uses) < 0:
             raise ConfigError("GameplayConfig.max_pointer_uses must be >= 0")
         if int(self.pointer_sectors) < 1:
@@ -202,8 +212,15 @@ class ExplorationGame:
             "marker": 0,
         }
         self._quest_manager = quest_manager
-        self._ropes = RopeSystem()
+        rope_pool = float(getattr(self._config, "max_rope_pool", 1_000_000.0))
+        self._ropes = RopeSystem(total_pool=rope_pool)
+        self._quest_time_limit: Optional[float] = None
+        self._quest_time_started: Optional[float] = None
+        self._quest_timer_id: Optional[str] = None
+        self._time_expired = False
+        self._defeated = False
         self._position: ParameterPosition = (float(world.start[0]), float(world.start[1]))
+        self._last_client_sync = time.monotonic()
         self._steps = 0
         self._elapsed = 0.0
         self._log: List[LogEntry] = []
@@ -213,6 +230,7 @@ class ExplorationGame:
         self._homotopy_phase_u = 0.0
         self._homotopy_phase_v = 0.0
         self._won = False
+        self._sync_quest_timer()
         self._update_victory()
 
     # -- read-only player state -------------------------------------------
@@ -258,6 +276,60 @@ class ExplorationGame:
     def rope_remaining(self) -> float:
         return self._ropes.remaining
 
+    def _sync_quest_timer(self) -> None:
+        tier = str(getattr(self._config, "difficulty", "easy")).strip().lower()
+        quest = self._quest_manager.active_quest if self._quest_manager is not None else None
+        if tier != "hard" or quest is None:
+            self._quest_time_limit = None
+            self._quest_time_started = None
+            self._quest_timer_id = None
+            self._time_expired = False
+            return
+        if self._quest_timer_id != quest.id:
+            self._quest_timer_id = quest.id
+            self._quest_time_limit = hard_mode_time_limit(self._config.scale_factor)
+            self._quest_time_started = time.monotonic()
+            self._time_expired = False
+        if self._quest_time_started is not None and not self._time_expired:
+            remaining = self._quest_time_limit - (time.monotonic() - self._quest_time_started)
+            if remaining <= 0.0:
+                self._time_expired = True
+                self._defeated = True
+                self._won = False
+
+    @property
+    def quest_time_limit(self) -> Optional[float]:
+        self._sync_quest_timer()
+        return self._quest_time_limit
+
+    @property
+    def quest_time_remaining(self) -> Optional[float]:
+        self._sync_quest_timer()
+        if self._quest_time_limit is None or self._quest_time_started is None:
+            return None
+        return max(0.0, self._quest_time_limit - (time.monotonic() - self._quest_time_started))
+
+    @property
+    def is_time_expired(self) -> bool:
+        self._sync_quest_timer()
+        return bool(self._time_expired)
+
+    @property
+    def defeated(self) -> bool:
+        return bool(self._defeated)
+
+    @property
+    def max_markers_allowed(self) -> int:
+        return int(getattr(self._config, "max_markers", 0) or 0)
+
+    def advance_quest_timer(self, seconds: float) -> None:
+        """Advance Hard-mode time for deterministic tests and UI integration."""
+        self._sync_quest_timer()
+        if self._quest_time_started is None:
+            return
+        self._quest_time_started -= max(0.0, float(seconds))
+        self._sync_quest_timer()
+        self._update_victory()
     def connect_rope(self, node_a: RopeNode, node_b: RopeNode) -> Rope:
         try:
             return self._ropes.connect(node_a, node_b)
@@ -487,11 +559,76 @@ class ExplorationGame:
 
     @property
     def score(self) -> float:
-        return float(self.calculate_score())
+        return float(self.calculate_score()["total_score"])
 
-    def calculate_score(self) -> float:
-        """Reserved scoring hook (Task 17): returns 0 until a formula is added."""
-        return 0.0
+    def calculate_score(self) -> Dict[str, object]:
+        """Task 27: structured metric score, rank and breakdown ledger."""
+        completed = len(self._quest_manager.completed_quests) if self._quest_manager is not None else 0
+        base = 2000.0 if self._won else 0.0
+        scale = float(self._config.scale_factor)
+        target_time = max(1e-9, 240.0 * scale)
+        time_bonus = max(0.0, 3000.0 * (1.0 - self._elapsed / (2.0 * target_time)))
+
+        marker_count = len(self._markers)
+        marker_bonus = max(0.0, 1000.0 - 80.0 * max(0, marker_count - 3 * completed))
+
+        rope_total = max(1e-9, float(self._ropes.total_pool))
+        rope_bonus = max(0.0, 1000.0 * float(self._ropes.remaining) / rope_total)
+
+        measure_calls = int(self._tool_usages.get("triangle", 0)) + int(self._tool_usages.get("curvature", 0))
+        allowed_calls = 4 * completed
+        tool_bonus = max(0.0, 1000.0 - 40.0 * max(0, measure_calls - allowed_calls))
+
+        step_penalty = min(1000.0, float(self._effective_steps) * 0.2)
+        difficulty = str(self._config.difficulty).strip().lower()
+        difficulty_mult = {"easy": 1.0, "medium": 1.5, "hard": 2.2}.get(difficulty, 1.0)
+        if abs(scale - 0.5) < 1e-9:
+            scale_mult = 0.8
+        elif abs(scale - 1.0) < 1e-9:
+            scale_mult = 1.0
+        elif abs(scale - 2.0) < 1e-9:
+            scale_mult = 1.25
+        elif abs(scale - 4.0) < 1e-9:
+            scale_mult = 1.5
+        else:
+            scale_mult = min(2.0, max(0.6, 0.8 * math.sqrt(max(scale, 1e-9))))
+        combined_mult = float(difficulty_mult) * float(scale_mult)
+
+        subtotal = base + time_bonus + marker_bonus + rope_bonus + tool_bonus - step_penalty
+        final_score = int(math.floor(max(100.0, subtotal * combined_mult)))
+        if final_score >= 8000:
+            rank = "S"
+        elif final_score >= 5500:
+            rank = "A"
+        elif final_score >= 3500:
+            rank = "B"
+        else:
+            rank = "C"
+        return {
+            "total_score": final_score,
+            "rank": rank,
+            "breakdown": {
+                "base": round(base, 2),
+                "time_bonus": round(time_bonus, 2),
+                "marker_bonus": round(marker_bonus, 2),
+                "rope_bonus": round(rope_bonus, 2),
+                "tool_bonus": round(tool_bonus, 2),
+                "step_penalty": round(step_penalty, 2),
+                "marker_count": int(marker_count),
+                "rope_remaining": round(float(self._ropes.remaining), 2),
+                "rope_total": round(rope_total, 2),
+                "effective_steps": round(float(self._effective_steps), 2),
+                "measure_calls": int(measure_calls),
+                "completed_quests": int(completed),
+                "multipliers": {
+                    "difficulty": difficulty,
+                    "difficulty_mult": float(difficulty_mult),
+                    "scale": float(scale),
+                    "scale_mult": float(scale_mult),
+                    "combined": combined_mult,
+                },
+            },
+        }
 
     def record_tool_usage(self, name: str) -> None:
         key = str(name).strip().lower()
@@ -727,6 +864,11 @@ class ExplorationGame:
             penalty = self.calculate_slope_penalty(previous[0], previous[1], du, dv)
             self._last_slope = penalty
             self._effective_steps += 1.0 / max(float(penalty["speed_scale"]), 1e-9)
+        now = time.monotonic()
+        dt = min(1.0, max(0.0, now - self._last_client_sync))
+        self._last_client_sync = now
+        if math.hypot(du, dv) > 1e-12:
+            self._elapsed += dt
         self._position = wrapped
         self._record_homotopy_delta(du, dv)
         self._trajectory.append(self._position)
@@ -771,6 +913,12 @@ class ExplorationGame:
             raise GameError("marker name must be non-empty")
         if cleaned in self._markers:
             raise GameError(f"marker {cleaned!r} already exists")
+        limit = int(getattr(self._config, "max_markers", 0) or 0)
+        if limit > 0 and len(self._markers) >= limit:
+            raise GameError(
+                f"Hard mode limit: Maximum {limit} marker pegs reached. "
+                "Remove existing pegs to proceed."
+            )
         self._tool_usages["marker"] += 1
         observation = self.peek_detector()
         marker = Marker(
@@ -1021,6 +1169,9 @@ class ExplorationGame:
 
     def _update_victory(self) -> None:
         if self._won:
+            return
+        if self._defeated:
+            self._won = False
             return
         distance = self._world.ambient_distance(self._position, self._world.exit)
         sealed = self._quest_manager is not None and not self._quest_manager.exit_unlocked

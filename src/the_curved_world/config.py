@@ -183,6 +183,8 @@ class WorldConfig:
     # Task 17: geometric scale S in [0.2, 10.0] and the difficulty tier.
     scale_factor: float = 1.0
     difficulty: str = "easy"
+    max_rope_pool: float = 1_000_000.0
+    max_markers: int = 0
     #: How the world measures distance between two places:
     #:
     #: * ``"euclidean"`` (default) -- plain ambient Euclidean distance between
@@ -218,6 +220,13 @@ class WorldConfig:
             raise ConfigError("WorldConfig.scale_factor must be within [0.2, 10.0]")
         if str(self.difficulty).strip().lower() not in ("easy", "medium", "hard"):
             raise ConfigError("WorldConfig.difficulty must be one of easy/medium/hard")
+        if not np.isfinite(float(self.max_rope_pool)) or float(self.max_rope_pool) <= 0.0:
+            raise ConfigError("WorldConfig.max_rope_pool must be finite and > 0")
+        if int(self.max_markers) < 0:
+            raise ConfigError("WorldConfig.max_markers must be >= 0")
+        if str(self.difficulty).strip().lower() == "hard":
+            object.__setattr__(self, "max_rope_pool", min(float(self.max_rope_pool), 500.0))
+            object.__setattr__(self, "max_markers", min(int(self.max_markers) or 8, 8))
         if self.max_placement_attempts < 1:
             raise ConfigError("WorldConfig.max_placement_attempts must be >= 1")
         if self.distance_mode not in DISTANCE_MODES:
@@ -284,3 +293,13 @@ def default_config() -> WorldConfig:
     from src.the_curved_world.maps import DEFAULT_MAP_ID, world_config_for
 
     return world_config_for(DEFAULT_MAP_ID)
+
+def hard_mode_time_limit(scale_factor: float) -> float:
+    """Scale-adaptive Hard-mode quest limit in seconds (Task 26)."""
+    scale = float(scale_factor)
+    if scale <= 0.0:
+        return 240.0
+    for value, seconds in ((0.5, 120.0), (1.0, 240.0), (2.0, 360.0), (4.0, 480.0)):
+        if abs(scale - value) <= 1e-9:
+            return seconds
+    return max(30.0, 240.0 * scale)

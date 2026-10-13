@@ -550,3 +550,75 @@ button.primary:hover { border-color: #6fb4ff; }
   font-weight: 400;
   box-shadow: none;
 }
+/* -- Task 26: field guide, hard-mode timer and defeat flow --------------- */
+header .field-guide { margin-left: 8px; opacity: 0.9; }
+.quest-timer {
+  margin-left: auto;
+  color: var(--warn);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+.quest-timer.warning {
+  color: var(--error);
+  animation: timer-pulse 0.9s ease-in-out infinite;
+}
+@keyframes timer-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+.defeat-card { border-color: rgba(255, 107, 107, 0.55); }
+.defeat-card h2 { color: var(--error); }
+.defeat-card .hint { border-left: 3px solid var(--error); padding-left: 10px; }
+/* -- relative-height legend --------------------------------------------- */
+.elevation-legend {
+  position: absolute;
+  top: 44px;
+  right: 24px;
+  z-index: 11;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(10, 16, 24, 0.62);
+  color: var(--muted);
+  font-size: 10px;
+  pointer-events: none;
+}
+.elevation-legend i {
+  display: block;
+  width: 72px;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #1e3a24, #426b34, #7aa84c, #d2d88a);
+}
+/* -- Task 27: scholar rank and score ledger ----------------------------- */
+.rank-badge {
+  margin: 10px 0 12px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 214, 102, 0.65);
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(255, 214, 102, 0.16), rgba(77, 171, 247, 0.08));
+  color: #f3e5ab;
+  font-size: 15px;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: 0.04em;
+  box-shadow: 0 0 24px rgba(255, 214, 102, 0.18);
+}
+.score-ledger { display: grid; gap: 6px; margin: 10px 0 4px; }
+.score-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #101823;
+  color: var(--muted);
+  font-size: 12px;
+}
+.score-row strong { color: var(--text); font-weight: 600; }
+.score-row.total { border-color: rgba(255, 214, 102, 0.6); color: #f3e5ab; font-size: 14px; }
+.score-row.total strong { color: #f3e5ab; }

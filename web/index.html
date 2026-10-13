@@ -19,12 +19,14 @@
       <span id="cleared" class="badge ok hidden">Cleared</span>
     </div>
     <button id="open-lobby" class="ghost">&#8635; New world / Choose map</button>
+    <button id="field-guide" class="ghost field-guide hidden">[H] Field Guide</button>
   </header>
 
   <main>
     <section class="panel viewport">
       <h2>Local Tangent Map - seamless top-down view</h2>
       <canvas id="map-canvas" width="720" height="540"></canvas>
+      <div class="elevation-legend" aria-hidden="true"><span>Low</span><i></i><span>High</span></div>
       <div class="keybind-bar" aria-label="Quick controls">
         <span><kbd>WASD</kbd> Move</span>
         <span><kbd>1-5</kbd> Tools</span>
@@ -32,6 +34,7 @@
         <span><kbd>R-Click</kbd> Cut Rope</span>
         <span><kbd>R</kbd> Mode</span>
         <span><kbd>J</kbd> Codex</span>
+        <span><kbd>H</kbd> Guide (Easy)</span>
       </div>
       <div id="hint-box" class="hint-box hidden"></div>
       <p class="hint">
@@ -50,7 +53,7 @@
 
     <section class="panel">
       <div id="quest-tracker" class="quest-tracker">
-        <h3>Current Quest <span id="quest-relic-count" class="badge">0 seals</span></h3>
+        <h3>Current Quest <span id="quest-relic-count" class="badge">0 seals</span> <span id="quest-timer" class="quest-timer hidden">Time Remaining: --:--</span></h3>
         <div class="quest-title" id="quest-title">No active quest</div>
         <p class="hint" id="quest-description"></p>
         <div class="quest-progress-row">
@@ -128,7 +131,7 @@
         <legend>Difficulty</legend>
         <label class="radio"><input type="radio" name="difficulty" value="easy" checked /> &#128994; Easy - distance detector + eye pointer (default)</label>
         <label class="radio"><input type="radio" name="difficulty" value="medium" /> &#128993; Medium - distance detector offline; use the eye pointer and pure geometry</label>
-        <label class="radio"><input type="radio" name="difficulty" value="hard" /> &#128308; Hard - [Reserved / Work in Progress]</label>
+        <label class="radio"><input type="radio" name="difficulty" value="hard" /> &#128308; Hard - Timed survival: 500 m rope, 8 pegs, quest countdown</label>
       </fieldset>
       <p id="difficulty-note" class="hint"></p>
 
@@ -156,6 +159,7 @@
       <p class="hint">
         You reached the hidden exit of this manifold. Here is your exploration career summary:
       </p>
+      <div id="victory-rank" class="rank-badge">Rank: - [Academy Initiate]</div>
       <dl class="victory-summary">
         <div><dt>Steps</dt><dd id="victory-steps">-</dd></div>
         <div><dt>Detector readings</dt><dd id="victory-readings">-</dd></div>
@@ -170,13 +174,26 @@
       </dl>
       <h3 class="victory-relic-title">Collected Relics</h3>
       <div id="victory-relics" class="victory-relics"></div>
+      <div id="victory-breakdown" class="score-ledger"></div>
       <div class="modal-actions">
         <button id="victory-continue" class="ghost">Continue Free Roam</button>
         <button id="victory-lobby" class="primary">Return to Lobby</button>
       </div>
     </div>
   </div>
-  <div id="proof-modal" class="modal hidden">
+  <div id="defeat-modal" class="modal hidden">
+    <div class="modal-card defeat-card">
+      <h2>Trial Expired - Singular Collapse</h2>
+      <p class="hint">
+        The current world has been marked Defeated. You may keep exploring freely, but this run
+        can no longer claim a clean victory.
+      </p>
+      <div class="modal-actions">
+        <button id="defeat-continue" class="ghost">Continue Exploring (Defeated)</button>
+        <button id="defeat-lobby" class="primary">Return to Academy Lobby</button>
+      </div>
+    </div>
+  </div>  <div id="proof-modal" class="modal hidden">
     <div class="modal-card proof-card proof-stage-wrapper">
       <div class="proof-layout">
         <section id="proof-stage" class="proof-stage" aria-label="Interactive geometry stage">

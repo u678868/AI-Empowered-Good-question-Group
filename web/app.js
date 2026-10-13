@@ -64,6 +64,10 @@ const state = {
   difficulty: 'easy',
   readings: 0,
   victoryShown: false,
+  defeatShown: false,
+  timeRemaining: null,
+  timeRemainingAt: 0,
+  timerQuestId: null,
   cleared: false,
   startedAt: 0,
   compassPulse: 0,
@@ -115,7 +119,7 @@ function formatLength(value, digits = 2, fallback = '-') {
   return Number.isFinite(number) ? `${number.toFixed(digits)} m` : fallback;
 }
 
-function formatCurvature(value, digits = 4, fallback = '-') {
+function formatCurvature(value, digits = 5, fallback = '-') {
   const number = Number(value);
   return Number.isFinite(number) ? `${number.toFixed(digits)} m\u207b\u00b2` : fallback;
 }
@@ -215,6 +219,7 @@ const GRASS_LOW = [61, 126, 52];
 const GRASS_HIGH = [104, 170, 74];
 const GRASS_DRY = [178, 184, 104];
 const GRASS_ROCK = [78, 88, 60];
+const HILLSHADE_LIGHT = normalize3([-1 / Math.sqrt(3), -1 / Math.sqrt(3), 1 / Math.sqrt(3)]);
 
 // Grassland biome shading: height blends the green, steep ground turns mossy,
 // and high dry ridges pick up a faint straw tint. Returns an [r, g, b] triple
@@ -399,7 +404,6 @@ function buildTerrain(patch) {
   const stride = nx > 40 ? 2 : 1;
   const [zLow, zHigh] = zRange(patch);
   const span = Math.max(1e-9, zHigh - zLow);
-  const light = normalize3([-0.35, 0.5, 0.79]);
   const grid = [];
   for (let j = 0; j < ny; j += stride) {
     const row = [];
@@ -422,9 +426,9 @@ function buildTerrain(patch) {
       ];
       let normal = normalize3(cross(ru, rv));
       if (normal[2] < 0) normal = normal.map((value) => -value);
-      const shade = 0.62 + 0.38 * Math.max(0, dot(normal, light));
       const steep = Math.sqrt(Math.max(0, patch.E[j][i] - 1) + Math.max(0, patch.G[j][i] - 1));
-      const rgb = grassRGB((patch.z[j][i] - zLow) / span, steep).map((value) => clamp(value * shade, 0, 255));
+      const elevation = clamp((patch.z[j][i] - zLow) / span, 0, 1);
+      const rgb = grassRGB(elevation, steep).map((value) => clamp(value * (0.78 + 0.44 * elevation), 0, 255));
       row.push({ x: patch.x[i], y: patch.y[j], z: patch.z[j][i], rgb });
     }
     grid.push(row);
@@ -432,6 +436,60 @@ function buildTerrain(patch) {
   const levels = [];
   for (let k = 1; k <= 7; k += 1) levels.push(zLow + span * k / 8);
   return { grid, contours: buildContours(grid, levels), zLow, zHigh };
+}
+
+// GIS-style Lambertian hillshading: light from the north-west, natural grass
+// brightening on sun-facing slopes and soft shadow in windward troughs.
+function applyHillshading(ctx, patch) {
+  const view = state.mapView;
+  if (!view || !patch || !patch.x || !patch.X) return;
+  const project = (u, v) => {
+    const [du, dv] = chartDelta(u, v, view.phys[0], view.phys[1]);
+    return [view.cx + du * view.scale, view.cy - dv * view.scale];
+  };
+  const nx = patch.x.length;
+  const ny = patch.y.length;
+  const stride = nx > 40 ? 2 : 1;
+  for (let j = 0; j < ny - stride; j += stride) {
+    for (let i = 0; i < nx - stride; i += stride) {
+      const i0 = Math.max(0, i - 1);
+      const i1 = Math.min(nx - 1, i + 1);
+      const j0 = Math.max(0, j - 1);
+      const j1 = Math.min(ny - 1, j + 1);
+      const du = (patch.x[i1] - patch.x[i0]) || 1e-9;
+      const dv = (patch.y[j1] - patch.y[j0]) || 1e-9;
+      const ru = [
+        (patch.X[j][i1] - patch.X[j][i0]) / du,
+        (patch.Y[j][i1] - patch.Y[j][i0]) / du,
+        (patch.z[j][i1] - patch.z[j][i0]) / du,
+      ];
+      const rv = [
+        (patch.X[j1][i] - patch.X[j0][i]) / dv,
+        (patch.Y[j1][i] - patch.Y[j0][i]) / dv,
+        (patch.z[j1][i] - patch.z[j0][i]) / dv,
+      ];
+      let normal = normalize3(cross(ru, rv));
+      if (normal[2] < 0) normal = normal.map((value) => -value);
+      const intensity = clamp(dot(normal, HILLSHADE_LIGHT), 0.55, 1.15);
+      const delta = intensity - 1.0;
+      if (Math.abs(delta) < 0.008) continue;
+      const alpha = clamp(Math.abs(delta) * 0.62, 0, 0.30);
+      const p0 = project(patch.x[i], patch.y[j]);
+      const p1 = project(patch.x[Math.min(nx - 1, i + stride)], patch.y[j]);
+      const p2 = project(patch.x[Math.min(nx - 1, i + stride)], patch.y[Math.min(ny - 1, j + stride)]);
+      const p3 = project(patch.x[i], patch.y[Math.min(ny - 1, j + stride)]);
+      ctx.fillStyle = delta > 0 ? `rgba(255,255,255,${alpha})` : `rgba(0,0,0,${alpha})`;
+
+
+      ctx.beginPath();
+      ctx.moveTo(p0[0], p0[1]);
+      ctx.lineTo(p1[0], p1[1]);
+      ctx.lineTo(p2[0], p2[1]);
+      ctx.lineTo(p3[0], p3[1]);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
 }
 
 // ------------------------------------------------- collision geometry -----
@@ -652,6 +710,8 @@ function drawTopDownWorld() {
       ctx.stroke();
     }
   }
+
+  applyHillshading(ctx, patch);
 
   // 2. Semi-transparent contour lines: the topography is visible, the global
   //    topology is not.
@@ -1176,6 +1236,29 @@ function applySnapshot(snapshot) {
   if (typeof state.player.difficulty === 'string') {
     state.difficulty = state.player.difficulty;
   }
+  if (Object.prototype.hasOwnProperty.call(snapshot, 'time_remaining')) {
+    if (typeof snapshot.time_remaining === 'number') {
+      const serverRemaining = Number(snapshot.time_remaining);
+      const localRemaining = currentTimeRemaining();
+      const questId = snapshot.quest && snapshot.quest.id ? String(snapshot.quest.id) : null;
+      const questLabel = (snapshot.quest && (snapshot.quest.title || snapshot.quest.id)) || 'New trial';
+      const questChanged = questId !== null && questId !== state.timerQuestId;
+      // The countdown is monotonic: a stale or duplicated payload can never push it
+      // back up. The only legitimate restart is a brand new trial being accepted, so
+      // that restart is announced in the hint area and is never a surprise.
+      const restarted = questChanged && localRemaining !== null && serverRemaining > localRemaining + 0.5;
+      if (state.timeRemaining === null || localRemaining === null || questChanged || serverRemaining <= localRemaining + 0.05) {
+        state.timeRemaining = serverRemaining;
+        state.timeRemainingAt = performance.now();
+        if (restarted) hintMessage(`${questLabel} accepted - Hard-mode countdown restarts at full time.`, 'info');
+      }
+      if (questId !== null) state.timerQuestId = questId;
+    } else {
+      state.timeRemaining = null;
+      state.timeRemainingAt = 0;
+      state.timerQuestId = null;
+    }
+  }
   syncDetectorLock();
   state.terrainCache = null;
   maybeShowQuestProof();
@@ -1187,11 +1270,18 @@ function applySnapshot(snapshot) {
     PHYS.uv = state.player.position.slice();
   }
   maybeShowVictory();
+  maybeShowDefeat();
 }
 
 async function refreshState() {
   applySnapshot(await apiGet('/api/state/player'));
   renderAll();
+}
+
+function currentTimeRemaining() {
+  if (state.difficulty !== 'hard' || typeof state.timeRemaining !== 'number') return null;
+  const elapsed = (performance.now() - (state.timeRemainingAt || performance.now())) / 1000;
+  return Math.max(0, state.timeRemaining - elapsed);
 }
 
 function formatDuration(seconds) {
@@ -1233,6 +1323,36 @@ function renderVictoryRelics() {
   }
 }
 
+const RANK_TITLES = {
+  S: 'Archimedean Grandmaster',
+  A: 'Geodesic Scholar',
+  B: 'Manifold Surveyor',
+  C: 'Academy Initiate',
+};
+
+function rankTitle(rank) {
+  return RANK_TITLES[rank] || RANK_TITLES.C;
+}
+
+function renderVictoryScore(p) {
+  const score = p.score_breakdown || {};
+  const data = score.breakdown || {};
+  const multipliers = data.multipliers || {};
+  const total = Number(score.total_score ?? p.score ?? 0);
+  const rank = score.rank || p.rank || 'C';
+  el('victory-rank').textContent = `Rank: ${rank} [${rankTitle(rank)}]`;
+  const row = (label, value, totalRow) => `<div class="score-row${totalRow ? ' total' : ''}"><span>${label}</span><strong>${value}</strong></div>`;
+  el('victory-breakdown').innerHTML = [
+    row('Base Clearance', `+${Math.round(Number(data.base) || 0)}`),
+    row('Time Efficiency', `+${Math.round(Number(data.time_bonus) || 0)} (Time: ${formatDuration(Number(p.elapsed_time) || 0)})`),
+    row('Frugal Surveyor', `+${Math.round((Number(data.marker_bonus) || 0) + (Number(data.rope_bonus) || 0))} (Pegs: ${Number(data.marker_count) || 0}, Rope Left: ${proofFormat(data.rope_remaining, 2)} m)`),
+    row('Tool Discipline', `+${Math.round(Number(data.tool_bonus) || 0)} (${Number(data.measure_calls) || 0} calls)`),
+    row('Path Exhaustion', `-${Math.round(Number(data.step_penalty) || 0)} (Effective Steps ${proofFormat(data.effective_steps, 1)})`),
+    row('Difficulty & Scale Multiplier', `x${proofFormat(multipliers.combined, 2)} (${difficultyLabel(multipliers.difficulty || state.difficulty)} x ${proofFormat(multipliers.scale_mult, 2)})`),
+    row('Final Score', `${Math.round(total)}`, true),
+  ].join('');
+  el('victory-score').textContent = `${Math.round(total)}`;
+}
 function maybeShowVictory() {
   const p = state.player;
   if (!p || !p.won || state.victoryShown) return;
@@ -1246,7 +1366,7 @@ function maybeShowVictory() {
   el('victory-seed').textContent = `${p.seed}`;
   el('victory-difficulty').textContent = difficultyLabel(state.difficulty);
   el('victory-scale').textContent = `${(state.scaleFactor || 1).toFixed(2)}x`;
-  el('victory-score').textContent = `${Math.round(p.score || 0)}`;
+  renderVictoryScore(p);
   renderVictoryRelics();
   el('victory-modal').classList.remove('hidden');
   message('Exit found - the victory summary is open.', 'ok');
@@ -1254,6 +1374,21 @@ function maybeShowVictory() {
 
 function hideVictory() {
   el('victory-modal').classList.add('hidden');
+}
+
+function maybeShowDefeat() {
+  const p = state.player;
+  const remaining = currentTimeRemaining();
+  const expired = Boolean(p && (p.is_time_expired || (remaining !== null && remaining <= 0)));
+  if (!p || !expired || state.defeatShown) return;
+  state.defeatShown = true;
+  el('defeat-modal').classList.remove('hidden');
+  hintMessage('Trial expired - singular collapse.', 'error', true);
+}
+
+function continueAfterDefeat() {
+  el('defeat-modal').classList.add('hidden');
+  message('World remains open in defeated free roam.', 'error');
 }
 
 
@@ -1264,6 +1399,14 @@ function renderQuest() {
   if (!quest) return;
   const relics = quest.relics || [];
   el('quest-relic-count').textContent = `${relics.length} seal${relics.length === 1 ? '' : 's'}`;
+  const remaining = currentTimeRemaining();
+  const timer = el('quest-timer');
+  if (timer) {
+    const showTimer = state.difficulty === 'hard' && typeof remaining === 'number';
+    timer.classList.toggle('hidden', !showTimer);
+    timer.classList.toggle('warning', showTimer && remaining <= 30);
+    timer.textContent = showTimer ? `Time Remaining: ${formatDuration(remaining)}` : 'Time Remaining: --:--';
+  }
   el('quest-title').textContent = quest.title || 'No active quest';
   el('quest-description').textContent = quest.description || '';
   el('quest-hint').textContent = quest.hint || '';
@@ -1685,6 +1828,155 @@ function proofHistoricLabels(proof) {
   return Array.isArray(labels) && labels.length ? labels.slice(0, 3).join(' / ') : 'A / B / C';
 }
 
+const GUIDE_PROOFS = {
+  gauss_bonnet_excess: {
+    quest_id: 'gauss_bonnet_excess',
+    kind: 'gauss_bonnet_excess',
+    title: 'Academy Field Guide: Gauss-Bonnet Angle Excess',
+    relic: 'Curvature Seal',
+    detail: {
+      kind: 'gauss_bonnet_excess',
+      mode: 'excess',
+      is_deficit: false,
+      target_relation: '>=',
+      measured_sum: 3.4034,
+      target_sum: 3.2463,
+      excess_rad: 0.2618,
+      target_excess_rad: 0.1047,
+      angle_sum_degrees: 195.0,
+      target_degrees: 186.0,
+      excess_degrees: 15.0,
+      target_excess_degrees: 6.0,
+      reference_excess_rad: 0.2094,
+      reference_excess_degrees: 12.0,
+      k_max: 0.0184,
+      genus: 1,
+      markers: ['A', 'B', 'C'],
+      relic: 'Curvature Seal',
+    },
+  },
+  bdp_circle_deficit: {
+    quest_id: 'bdp_circle_deficit',
+    kind: 'bdp_circle_deficit',
+    title: 'Academy Field Guide: BDP Circle Deficit',
+    relic: 'Metric Seal',
+    detail: {
+      kind: 'bdp_circle_deficit',
+      center: 'O',
+      vertices: ['P1', 'P2', 'P3', 'P4'],
+      triangle_labels: ['A', 'B', 'C'],
+      vertex_count: 48,
+      radius: 18.75,
+      flat_perimeter: 117.81,
+      real_perimeter: 113.25,
+      perimeter: 113.25,
+      circle_perimeter: 117.81,
+      ratio: 0.9613,
+      target_ratio: 0.9650,
+      deficit: 0.0387,
+      deficit_ratio: 0.0387,
+      k_est: 0.00875,
+      k_estimate: 0.00875,
+      k_exact: 0.00902,
+      k_analytic: 0.00902,
+      relative_error: 0.0299,
+      is_circumcircle: true,
+      relic: 'Metric Seal',
+    },
+  },
+  holonomy_loop: {
+    quest_id: 'holonomy_loop',
+    kind: 'holonomy_loop',
+    title: 'Academy Field Guide: Levi-Civita Holonomy',
+    relic: 'Connection Seal',
+    detail: {
+      kind: 'holonomy_loop',
+      start_vector: [1.0, 0.0],
+      end_vector: [0.7071, 0.7071],
+      holonomy_angle_deg: 45.0,
+      holonomy_angle_rad: Math.PI / 4,
+      target_angle_deg: 28.0,
+      target_angle_rad: 0.4887,
+      area_flux_rad: 0.7854,
+      area_flux_deg: 45.0,
+      relative_error: 0.0,
+      vertex_labels: ['A', 'B', 'C', 'D'],
+      vector_start: [1.0, 0.0],
+      vector_end: [0.7071, 0.7071],
+      transport_steps: 96,
+      closure_error: 0.002,
+      closure_tolerance: 0.1,
+      relic: 'Connection Seal',
+    },
+  },
+  parabolic_line: {
+    quest_id: 'parabolic_line',
+    kind: 'parabolic_line',
+    title: 'Academy Field Guide: Parabolic Seam',
+    relic: 'Singularity Seal',
+    detail: {
+      kind: 'parabolic_line',
+      labels: ['P1', 'P2', 'P3'],
+      curvatures: [0.0, 0.0001, -0.0002],
+      principal_curvatures: [[0.0, -0.20], [0.0, 0.12], [0.0, -0.18]],
+      asymptotic_directions: [[1.0, 0.0], [0.8, 0.6], [1.0, 0.0]],
+      asymptotic_direction: [1.0, 0.0],
+      pegs: [
+        { k: 0.0, kappa1: 0.0, kappa2: -0.20 },
+        { k: 0.0001, kappa1: 0.0, kappa2: 0.12 },
+        { k: -0.0002, kappa1: 0.0, kappa2: -0.18 },
+      ],
+      pairwise_distances: [3.0, 3.2, 3.1],
+      valid_pegs: 3,
+      target_pegs: 3,
+      tolerance: 0.004,
+      tolerance_k: 0.004,
+      min_distance: 2.0,
+      spacing_ok: true,
+      is_parabolic_verified: true,
+      relic: 'Singularity Seal',
+    },
+  },
+  homotopy_loop: {
+    quest_id: 'homotopy_loop',
+    kind: 'homotopy_loop',
+    title: 'Academy Field Guide: Homotopy Circumnavigation',
+    relic: 'Topology Seal',
+    detail: {
+      kind: 'homotopy_loop',
+      u_start: 0.0,
+      u_end: 2 * Math.PI,
+      v_start: 0.0,
+      v_end: 0.0,
+      delta_u: 2 * Math.PI,
+      delta_v: 0.0,
+      winding_u: 1.0,
+      winding_v: 0.0,
+      winding_max: 1.0,
+      genus: 1,
+      fundamental_group: 'Z + Z',
+      closure_distance: 0.02,
+      capture_radius: 3.0,
+      origin_label: 'O',
+      current_label: 'O',
+      relic: 'Topology Seal',
+    },
+  },
+};
+
+function showExampleGuide() {
+  if (state.difficulty !== 'easy') {
+    hintMessage('Field Guide preview is available in Easy mode.', 'warn');
+    return;
+  }
+  const quest = state.player && state.player.quest;
+  const kind = quest && GUIDE_PROOFS[quest.id] ? quest.id : 'gauss_bonnet_excess';
+  const proof = JSON.parse(JSON.stringify(GUIDE_PROOFS[kind]));
+  proof.title = 'Academy Field Guide: Theoretical Example Preview';
+  proof.__guide = true;
+  showProof(proof);
+  hintMessage('Field Guide opened - theoretical reference only; no seal is awarded.', 'info');
+}
 function buildGaussProofCards(proof) {
   const detail = proof && proof.detail ? proof.detail : {};
   const measured = proofNumber(detail.measured_sum, proofNumber(detail.angle_sum_degrees, 180) * Math.PI / 180);
@@ -1715,7 +2007,7 @@ function buildGaussProofCards(proof) {
     ['Measured sum', `${proofFormat(measuredDeg, 2)} deg`],
     ['Adaptive target', `${proofFormat(targetDeg, 2)} deg`],
     [isDeficit ? 'Angle deficit' : 'Angle excess', `${proofFormat(isDeficit ? deficitDeg : excessDeg, 2)} deg`],
-    [isDeficit ? 'Curvature trough' : 'Curvature peak', formatCurvature(curvatureValue, 4)],
+    [isDeficit ? 'Curvature trough' : 'Curvature peak', formatCurvature(curvatureValue, 5)],
   ]));
   cards.push(field);
 
@@ -1774,8 +2066,8 @@ function buildBdpProofCards(proof) {
   const inversion = proofCard('Curvature Inversion & Discrepancy');
   proofMath(inversion, 'K_{\\mathrm{est}}=\\frac{3(C_{\\mathrm{flat}}-C_{\\mathrm{real}})}{\\pi R^3}', { highlight: 'curvature' });
   inversion.appendChild(proofValueGrid([
-    ['Estimated K', formatCurvature(kEst, 4)],
-    ['Analytic K', formatCurvature(kExact, 4)],
+    ['Estimated K', formatCurvature(kEst, 5)],
+    ['Analytic K', formatCurvature(kExact, 5)],
     ['Relative error', proofFormat(error * 100, 3) + '%'],
     ['Ring vertices', String(detail.vertex_count || '-')],
   ]));
@@ -1870,11 +2162,11 @@ function buildParabolicProofCards(proof) {
 
   const field = proofCard('Parabolic Peg Measurements');
   pegs.slice(0, 3).forEach((peg, index) => {
-    proofMath(field, `P_{${index + 1}}: K\\approx ${formatCurvature(peg.k, 4)},\\quad \\kappa_1\\approx ${proofFormat(peg.kappa1, 4) + ' m\u207b\u00b9'},\\quad \\kappa_2\\approx ${proofFormat(peg.kappa2, 4) + ' m\u207b\u00b9'}\\ \\mathrm{m}^{-1}`, { highlight: 'pegs', displayMode: false });
+    proofMath(field, `P_{${index + 1}}: K\\approx ${formatCurvature(peg.k, 5)},\\quad \\kappa_1\\approx ${proofFormat(peg.kappa1, 5) + ' m\u207b\u00b9'},\\quad \\kappa_2\\approx ${proofFormat(peg.kappa2, 5) + ' m\u207b\u00b9'}\\ \\mathrm{m}^{-1}`, { highlight: 'pegs', displayMode: false });
   });
   field.appendChild(proofValueGrid([
     ['Valid pegs', `${detail.valid_pegs !== undefined ? detail.valid_pegs : pegs.length} / 3`],
-    ['Tolerance |K|', formatCurvature(tolerance, 4)],
+    ['Tolerance |K|', formatCurvature(tolerance, 5)],
     ['Spacing verified', detail.spacing_ok ? 'yes' : 'no'],
     ['Seam verified', verified ? 'yes' : 'no'],
   ]));
@@ -2507,7 +2799,7 @@ function drawParabolicProofStage(ctx, W, H, clock, timeline, proof, highlight) {
   ctx.fillStyle = 'rgba(232, 242, 228, 0.84)';
   ctx.font = '12px monospace';
   ctx.textAlign = 'left';
-  ctx.fillText(`parabolic band |K| <= ${formatCurvature(detail.tolerance_k, 4)}`, 16, 24);
+  ctx.fillText(`parabolic band |K| <= ${formatCurvature(detail.tolerance_k, 5)}`, 16, 24);
   ctx.fillText(`verified pegs = ${detail.valid_pegs !== undefined ? detail.valid_pegs : 0} / 3`, 16, 42);
   ctx.fillText('zero-curvature seam: one principal curvature vanishes', 16, H - 18);
 }
@@ -2672,6 +2964,7 @@ function showProof(proof) {
   stopProofAnimation();
   const safeProof = state.proof;
   el('proof-title').textContent = safeProof.title || 'Geometric Proof';
+  el('proof-accept').textContent = safeProof.__guide ? 'Close Guide & Return to Surveying' : 'Accept Seal & Continue';
   const relicBadge = el('proof-relic-badge');
   const relic = safeProof.relic || (safeProof.detail && safeProof.detail.relic) || '';
   relicBadge.textContent = relic;
@@ -2712,6 +3005,7 @@ function showProofModal(proof) {
 function hideProof() {
   stopProofAnimation();
   state.proofOpen = false;
+  el('proof-accept').textContent = 'Accept Seal & Continue';
   el('proof-modal').classList.add('hidden');
 }
 
@@ -2724,6 +3018,7 @@ function continueFreeRoam() {
 
 function returnToLobby() {
   hideVictory();
+  el('defeat-modal').classList.add('hidden');
   state.cleared = false;
   el('cleared').classList.add('hidden');
   showLobby();
@@ -2866,11 +3161,13 @@ function updateReadouts() {
   el('slope').textContent =
     `${slope.slope >= 0 ? '+' : ''}${slope.slope.toFixed(3)} (x${slope.speed_scale.toFixed(2)}${uphill ? ', uphill' : ''})`;
   if (typeof p.signal === 'number') el('detector-text').textContent = `signal ${p.signal.toFixed(4)} (${p.label}, ${p.trend})`;
-  if (typeof p.curvature === 'number') el('curvature').textContent = formatCurvature(p.curvature, 4);
+  if (typeof p.curvature === 'number') el('curvature').textContent = formatCurvature(p.curvature, 5);
   el('mode').textContent = state.godVisible ? 'god view (debug)' : 'top-down map';
   el('score').textContent = `${Math.round(p.score || 0)}`;
   el('scale-readout').textContent = `${(state.scaleFactor || 1).toFixed(2)}x`;
   el('difficulty-readout').textContent = difficultyLabel(state.difficulty);
+  const guideButton = el('field-guide');
+  if (guideButton) guideButton.classList.toggle('hidden', state.difficulty !== 'easy');
   const offline = state.difficulty === 'medium';
   const locked = Boolean(p.detector_locked);
   const offlineNote = el('sensor-offline');
@@ -2887,11 +3184,12 @@ function updateReadouts() {
   }
   renderQuest();
   if (state.codexOpen) renderCodex();
+  if (state.difficulty === 'hard') maybeShowDefeat();
 }
 
 function difficultyLabel(tier) {
   if (tier === 'medium') return 'Medium';
-  if (tier === 'hard') return 'Hard (reserved)';
+  if (tier === 'hard') return 'Hard - timed survival';
   return 'Easy';
 }
 
@@ -2993,7 +3291,9 @@ async function runTool(tool) {
       const result = await apiPost('/api/action/tool', { tool: 'mark', name: markerName(count) });
       spawnBeacon();
       await refreshState();
-      hintMessage(`Marker ${result.name} placed at (${result.position[0].toFixed(2)}, ${result.position[1].toFixed(2)}).`, 'ok');
+      const limit = state.player && typeof state.player.max_markers_allowed === 'number' ? state.player.max_markers_allowed : 0;
+      const remaining = limit > 0 ? Math.max(0, limit - (state.player.markers || []).length) : null;
+      hintMessage(`Marker ${result.name} placed at (${result.position[0].toFixed(2)}, ${result.position[1].toFixed(2)})${remaining !== null ? `; ${remaining} slots remaining` : ''}.`, 'ok');
       return;
     }
     hintMessage(`Unknown tool ${tool}.`, 'error');
@@ -3067,7 +3367,7 @@ function updateDifficultyNote() {
   if (tier === 'medium') {
     note.textContent = 'Medium: the distance detector is offline; use the eye pointer, curvature and the goniometer.';
   } else if (tier === 'hard') {
-    note.textContent = 'Hard is [Reserved / Work in Progress] - entering uses a safe placeholder with the detector offline.';
+    note.textContent = 'Hard: timed survival. Rope pool 500 m, maximum 8 marker pegs, quest countdown, detector offline.';
   } else {
     note.textContent = '';
   }
@@ -3094,6 +3394,11 @@ async function enterWorld() {
     state.selection = [];
     state.particles = [];
     state.beacons = [];
+    state.defeatShown = false;
+    state.timeRemaining = null;
+    state.timeRemainingAt = 0;
+    state.timerQuestId = null;
+    el('defeat-modal').classList.add('hidden');
     state.lastMeasure = null;
     state.pendingCut = null;
     state.angleMeasurements = {};
@@ -3142,8 +3447,17 @@ function selectSlot(slot) {
   updateQuestActionButton();
   const label = document.querySelector(`.hotbar .slot[data-slot="${state.slot}"] span`);
   const name = label ? label.textContent : '';
+  const player = state.player;
   if (state.ropeMode) {
-    hintMessage('Rope: select two path points.', 'info');
+    const remaining = player && typeof player.rope_remaining === 'number' ? formatLength(player.rope_remaining, 2) : '-';
+    const total = player && typeof player.rope_total === 'number' ? formatLength(player.rope_total, 2) : '-';
+    hintMessage(`Surveyor Rope: ${remaining} remaining of ${total}. Select two path points.`, 'info');
+  } else if (state.slot === 2) {
+    const count = player && Array.isArray(player.markers) ? player.markers.length : 0;
+    const limit = player && typeof player.max_markers_allowed === 'number' ? player.max_markers_allowed : 0;
+    const remaining = limit > 0 ? Math.max(0, limit - count) : null;
+    const suffix = limit > 0 ? ` / ${limit} placed, ${remaining} remaining` : ' placed';
+    hintMessage(`Marker Peg: ${count}${suffix}.`, 'info');
   } else if (state.measureMode) {
     hintMessage('Measure: choose Length or Angle.', 'info');
   } else {
@@ -3746,6 +4060,8 @@ window.addEventListener('keydown', (event) => {
     if (state.slot !== 4) selectSlot(4);
   } else if (key === 'j') {
     toggleCodex();
+  } else if (key === 'h') {
+    showExampleGuide();
   } else if (key === 'c') {
     if (state.player && (state.player.ropes || []).length) askCut('all');
   } else if (key === 'escape' && state.proofOpen) {
@@ -3828,7 +4144,10 @@ updateScaleField();
 updateDifficultyNote();
 el('victory-continue').addEventListener('click', continueFreeRoam);
 el('victory-lobby').addEventListener('click', returnToLobby);
+el('defeat-continue').addEventListener('click', continueAfterDefeat);
+el('defeat-lobby').addEventListener('click', returnToLobby);
 el('proof-accept').addEventListener('click', hideProof);
+el('field-guide').addEventListener('click', showExampleGuide);
 el('proof-replay').addEventListener('click', () => {
   if (proofAnimator) proofAnimator.replay();
 });
