@@ -9,27 +9,38 @@
 | 分区 | 目录 / 文件 | 权限 | 说明 |
 | :--- | :--- | :--- | :--- |
 | 隔离区 | `screenshots/`、`demo/`、`submission/`、`AGENTS.md` | 只读 | 参赛材料与规范文件 |
-| 开发区 | `src/`、`tests/`、`docs/`、`temp/`、`README.md`、`AI_USAGE.md`、构建配置 | 读写 | 源码、测试、文档与配置 |
+| 开发区 | `src/`、`web/`、`tests/`、`docs/`、`scripts/`、`temp/`、`README.md`、`AI_USAGE.md`、构建配置 | 读写 | 源码、前端、测试、文档、工具脚本与配置 |
 
 ## 3. 模块分层（实际实现）
 
 ```
-src/main.py                      入口：终端游戏 / --demo / --demo-scenario / --render / --view
+src/main.py                      入口：终端游戏 / --demo / --demo-scenario / --render / --view / --serve
 src/the_curved_world/
   config.py        配置数据类与校验（Domain / WaveComponent / GaussianHill / SurfaceConfig / WorldConfig）
   geometry.py      SmoothSurface（height / position / gradient / normal / contains / sample_grid）+ ambient_distance
-  manifold.py      ClosedManifold 基类 + 变形环面 / 变形椭球 / 双孔近似 / 克莱因瓶；
+  manifold.py      ClosedManifold 基类 + 变形环面 / 变形椭球 / 双孔近似 / 克莱因瓶 / 射影平面等；
                    chart 识别接口（chart_periods / wrap / chart_copies / chart_relative）
+  differential.py  第一/第二基本形式、面积元、Levi-Civita 平行移动与渐近方向
   detector.py      Detector（特权：signal / distance）+ DetectorConfig
   observations.py  信息边界：ObservationConfig / PlayerObservation / PlayerObserver / PlayerView
   world.py         WorldState（特权）/ DebugView / WorldGenerator
-  gameplay.py      ExplorationGame：移动、观测、日志、标记、测量、胜利
+  obstacles.py     两阶段障碍物生成、周期接缝碰撞与切线滑动
+  gameplay.py      ExplorationGame：移动、观测、日志、标记、测量、绳索接口、胜利与计分
+  quest.py         五大学派几何任务链：QuestManager + 各 GeometricQuest 与推导 payload
+  scanner.py       测地三角测量、曲率预检、双向 Gauss-Bonnet 可行性检查
+  ropes.py         有限绳池、节点图、外接圆拉取（BDP 测地圆）
   render.py        PlotMode / RenderConfig / SurfaceMeshCache / Scene / build_scene / MatplotlibRenderer
+  session.py       阻塞式交互主循环（终端游玩）
   demo.py          run_demo()：可复现的完整 Demo 场景
   cli.py           GameCLI：命令解析、呈现、视图切换
+  server.py        标准库本地 HTTP/静态服务：GameSession + /api/* 接口与特权门禁
+  maps/            地图注册表与 9 张内置地图（MapMetadata / MapRegistry / @register_map）
+web/               index.html / app.js / style.css / vendor/katex（离线公式资源）
+scripts/           scan_guardrails.py（红线扫描）/ package_submission.py（镜像与邮件压缩包）
+tests/             36 个测试模块，共 269 项用例
 ```
 
-**分层依赖方向（单向）：** `cli` / `render` / `demo` -> `gameplay` -> `world` -> `observations` / `detector` -> `geometry` -> `config`。
+**分层依赖方向（单向）：** `cli` / `session` / `render` / `demo` / `server` -> `gameplay` -> `quest` / `ropes` / `scanner` / `obstacles` -> `world` -> `observations` / `detector` -> `manifold` / `geometry` / `differential` -> `config`；前端 `web/` 只经 `/api/*` 读取玩家可见载荷。
 
 关键约束：
 

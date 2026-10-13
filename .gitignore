@@ -30,3 +30,9 @@ submission.zip
 # 过程记录与报告（无需纳入版本管理）
 process/
 report/
+
+# 演示视频（体积大且按 AGENTS.md 5.3 不上传 GitHub，仅随邮件提交包分发）
+demo/
+demo/*.mp4
+demo/*.mov
+demo/*.mkv

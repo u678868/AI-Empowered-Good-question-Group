@@ -219,7 +219,7 @@ signal = exp(-d_E / scale)
 | 探测器噪声 / 测量误差模型 | `detector.py` | ⏳ 未实现（设计上保持确定性） |
 | 玩家移动的测地线物理 | `gameplay.py` | ⏳ 未实现（参数空间运动学 + 坡度阻尼） |
 | 音效、存档槽、多人、更多语言 | - | ⏳ 未实现 |
-| 手动浏览器截图与 3 分钟演示录屏 | `screenshots/`、`demo/` | ⚠️ 部分完成：已提交无头渲染图；浏览器截图与录屏待补 |
+| 浏览器实拍截图与 3 分钟演示录屏 | `screenshots/`、`demo/` | ✅ 已实现：8 张截图（3 张无头渲染 + 5 张浏览器实拍）与 2:59.88 演示录屏 |
 
 ## 安装与测试
 
@@ -233,7 +233,8 @@ node --check web/app.js
 
 ## 可复现 Demo
 
-固定种子 `12345` 提供确定性的端到端演示：
+固定种子 `12345` 提供确定性的端到端演示；另有一段 2:59.88 的完整游玩录屏随包提供
+（`demo/`，其中 1:10-2:00 为三倍速，使全程压进 3 分钟内），录制脚本与地图说明见 `DEMO_LINK.md`：
 
 ```powershell
 .\.venv\Scripts\python.exe -m src.main --demo-scenario
@@ -298,7 +299,7 @@ node --check web/app.js
 | 源代码 | `src/`、`web/`、`tests/` | 269 项自动化测试，外加 `node --check web/app.js` |
 | 文档 | `README.md`、`README_CN.md`、`docs/` | 英文主 README 与完整中文版 |
 | AI 使用记录 | `AI_USAGE.md`、`ai-logs/` | 按任务记录 AI 辅助过程 |
-| 运行截图 | `screenshots/` | 3-8 张：大厅、切空间漫游与晕渲、绳索测绘、推导演播台、通关结算 |
+| 运行截图 | `screenshots/` | 共 8 张：3 张无头渲染图 + 大厅、三张实机玩家视图（漫游、量具读数、测绘叠加）与上帝视角 |
 | 演示 | `demo/`、`DEMO_LINK.md` | 3 分钟内录屏或外部链接，另附建议录制脚本 |
 | 邮件提交包 | `submission/TheCurvedWorld_MidnightAcademy_Submission.zip` | 用 `make package` 重建（`scripts/package_submission.py`） |
 
@@ -311,3 +312,6 @@ node --check web/app.js
   不是渲染缺陷。
 - `double_torus` 是亏格 2 的视觉近似；其参数域仍然是亏格 1。
 - Hard 模式刻意严苛：同时组合 500 m 绳池、8 个标记桩与任务倒计时。
+- 眼指针（限定 3 次、给出量化切平面方位）已在服务端内核实现，HUD 也显示剩余次数，但当前
+  网页版没有为它提供按钮或快捷键：`1`-`5` 热栏是 探测器 / 标记桩 / 绳索 / 量具 / 任务书。
+  大厅里仍写着 "eye pointer" 的文案属于历史遗留措辞。

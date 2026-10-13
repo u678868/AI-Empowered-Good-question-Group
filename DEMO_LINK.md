@@ -9,7 +9,7 @@ python -m venv .venv
 # then open http://127.0.0.1:8000/
 ```
 
-The lobby lets a reviewer pick one of the five maps, a play mode
+The lobby lets a reviewer pick one of the nine registered maps, a play mode
 (player / omniscient) and a seed, then enter the world. The player view
 is a seamless 2D top-down local tangent map: the player stays pinned to
 the centre and the grassland scrolls forever with wrapped parameter
@@ -43,21 +43,32 @@ Three of them are worth showing off in a demo:
 .\.venv\Scripts\python.exe -m src.main --play --map knot_garden --seed 12345
 ```
 
-## 3. Three-minute screen recording (suggested script)
+## 3. Recorded demo
 
-1. 0:00-0:30 - open the lobby, show the nine maps and their math blurbs,
-   pick `Deformed Torus (genus 1)` in player mode, enter.
-2. 0:30-1:20 - run with WASD (the mouse aims, Q/E turns); take a detector
-   reading with `1` (Compass) and watch the signal gauge.
-3. 1:20-2:00 - drop three markers with `5` (Beacon) and run the goniometer
-   with `3`; read the angle sum and the Gauss-Bonnet curvature integral.
-4. 2:00-2:30 - release the Eye pointer with `4` and show the quantised
-   tangent-plane bearing; run into a tree/rock to show the hard disc.
-5. 2:30-3:00 - reach the exit to show the victory modal (steps, readings,
-   markers, time, topology, seed) with Continue Free Roam / Return to
-   Lobby, then switch to the omniscient view (`G`) to reveal the surface.
+`demo/TheCurvedWorld_demo_3min.mp4` - 2:59.88, 3020x1734, AAC 160 kbps. It is a full
+play session; the segment from 1:10 to 2:00 plays at three times speed so the whole
+tour fits in three minutes. Everything else runs at normal speed.
 
-## 4. Automated verification
+## 4. Three-minute recording script (for re-shooting the demo)
+
+Tool layout of the current build: `1` Exit Detector, `2` Marker Peg, `3` Surveyor Rope,
+`4` Measure Tool (`R` toggles Length / Angle), `5` Quest Codex (`J` also opens it),
+`H` Easy-mode Field Guide, `G` God View (debug), right-click cuts a rope (`y` / `n`).
+
+1. 0:00-0:30 - open the lobby, show the nine maps and their math blurbs, pick
+   `Deformed Torus (genus 1)` in player mode, enter.
+2. 0:30-1:20 - run with WASD (the mouse aims, Q/E turn); read the exit detector with `1`
+   and watch the signal gauge, then open the Quest Codex with `5` to show the first seal.
+3. 1:20-2:00 - drop three markers with `2`, link them with the rope (`3`), then use the
+   Measure Tool (`4`, Angle mode) for the Gauss-Bonnet angle sum, and Length mode to pull
+   the rope triangle into the Bertrand-Diquet-Puisseux circumcircle.
+4. 2:00-2:30 - show the sealed instrument panel and the mission hint area while surveying;
+   run into a tree or rock to show the collision disc.
+5. 2:30-3:00 - reach the exit to show the victory modal (rank badge, score ledger, steps,
+   readings, markers, time, topology, seed), then press `G` in a `--debug` session to
+   reveal the whole surface in the omniscient view.
+
+## 5. Automated verification
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
