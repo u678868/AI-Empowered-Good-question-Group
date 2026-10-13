@@ -28,7 +28,11 @@ from src.the_curved_world.gameplay import ExplorationGame, GameError, GameplayCo
 from src.the_curved_world.observations import ObservationConfig
 from src.the_curved_world.quest import HolonomyMeasurement, ParabolicMeasurement, QuestManager, RingMeasurement
 from src.the_curved_world.ropes import RopeNode
-from src.the_curved_world.differential import parallel_transport_polyline, principal_curvatures
+from src.the_curved_world.differential import (
+    asymptotic_direction,
+    parallel_transport_polyline,
+    principal_curvatures,
+)
 from src.the_curved_world.manifold import wrap_parameter
 from src.the_curved_world.scanner import metric_length, scan_manifold
 from src.the_curved_world.world import WorldGenerator
@@ -191,8 +195,24 @@ class GameSession:
             genus_hint = MapRegistry.get(self.map_id).genus
         except MapNotFound:
             genus_hint = None
-        features = scan_manifold(world.surface, samples=31, genus_hint=genus_hint)
-        quest_manager = QuestManager(features, seed=int(world.seed))
+        obstacles = getattr(world, "obstacles", None)
+        blocked = (
+            lambda u, v: bool(obstacles.check_collision(float(u), float(v), 0.0))
+            if obstacles is not None
+            else False
+        )
+        features = scan_manifold(
+            world.surface,
+            samples=31,
+            genus_hint=genus_hint,
+            blocked=blocked,
+            blocked_key=(int(world.seed), float(self.scale_factor)),
+        )
+        quest_manager = QuestManager(
+            features,
+            seed=int(world.seed),
+            difficulty=self.difficulty,
+        )
         self._holonomy_start_label = None
         self._holonomy_vector = (1.0, 0.0)
         self._holonomy_calibrated = False
@@ -413,6 +433,7 @@ class GameSession:
         surface = game.player_view.surface
         curvatures = tuple(float(surface.gaussian_curvature(*point)) for point in points)
         principal = tuple(principal_curvatures(surface, *point) for point in points)
+        asymptotic = tuple(asymptotic_direction(surface, *point) for point in points)
         distances = []
         for i in range(3):
             for j in range(i + 1, 3):
@@ -421,6 +442,7 @@ class GameSession:
             labels=tuple(marker.name for marker in markers),
             curvatures=curvatures,
             principal_curvatures=principal,
+            asymptotic_directions=asymptotic,
             pairwise_distances=tuple(distances),
         )
         completion = game.evaluate_parabolic_measurement(measurement)
@@ -432,6 +454,14 @@ class GameSession:
             "labels": [marker.name for marker in markers],
             "curvatures": [_round(value, 10) for value in curvatures],
             "principal_curvatures": [[_round(a, 8), _round(b, 8)] for a, b in principal],
+            "asymptotic_directions": [
+                [_round(direction[0], 8), _round(direction[1], 8)]
+                for direction in asymptotic
+            ],
+            "asymptotic_direction": [
+                _round(asymptotic[0][0], 8),
+                _round(asymptotic[0][1], 8),
+            ] if asymptotic else [0.0, 0.0],
             "pairwise_distances": [_round(value) for value in distances],
             "tolerance": _round(float(manager.features.parabolic_tolerance), 10) if manager is not None else 0.0,
             "min_distance": _round(float(manager.features.parabolic_min_distance)) if manager is not None else 0.0,

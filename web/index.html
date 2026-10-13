@@ -4,7 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>The Curved World - Web Session</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="vendor/katex/katex.min.css" />
+  <link rel="stylesheet" href="style.css?v=1.0.0" />
 </head>
 <body>
   <header>
@@ -24,6 +25,14 @@
     <section class="panel viewport">
       <h2>Local Tangent Map - seamless top-down view</h2>
       <canvas id="map-canvas" width="720" height="540"></canvas>
+      <div class="keybind-bar" aria-label="Quick controls">
+        <span><kbd>WASD</kbd> Move</span>
+        <span><kbd>1-5</kbd> Tools</span>
+        <span><kbd>L-Click</kbd> Act</span>
+        <span><kbd>R-Click</kbd> Cut Rope</span>
+        <span><kbd>R</kbd> Mode</span>
+        <span><kbd>J</kbd> Codex</span>
+      </div>
       <div id="hint-box" class="hint-box hidden"></div>
       <p class="hint">
         The player is pinned to the centre. The grassland scrolls forever because everything is
@@ -159,6 +168,8 @@
         <div><dt>Map scale</dt><dd id="victory-scale">-</dd></div>
         <div><dt>Final Score</dt><dd id="victory-score">0</dd></div>
       </dl>
+      <h3 class="victory-relic-title">Collected Relics</h3>
+      <div id="victory-relics" class="victory-relics"></div>
       <div class="modal-actions">
         <button id="victory-continue" class="ghost">Continue Free Roam</button>
         <button id="victory-lobby" class="primary">Return to Lobby</button>
@@ -166,12 +177,30 @@
     </div>
   </div>
   <div id="proof-modal" class="modal hidden">
-    <div class="modal-card proof-card">
-      <h2 id="proof-title">Geometric Proof</h2>
-      <canvas id="proof-canvas" width="560" height="300"></canvas>
-      <ol id="proof-steps" class="proof-steps"></ol>
-      <div class="modal-actions">
-        <button id="proof-accept" class="primary">Accept Seal</button>
+    <div class="modal-card proof-card proof-stage-wrapper">
+      <div class="proof-layout">
+        <section id="proof-stage" class="proof-stage" aria-label="Interactive geometry stage">
+          <canvas id="proof-canvas" width="720" height="520"></canvas>
+          <div class="proof-controls">
+            <button id="proof-replay" class="ghost" type="button">&#8635; Replay</button>
+            <div id="proof-step-dots" class="proof-step-dots" role="tablist" aria-label="Proof steps"></div>
+          </div>
+        </section>
+        <section id="proof-scroll-area" class="proof-scroll-area" aria-label="Proof derivation">
+          <div id="proof-details" class="proof-details">
+            <div class="proof-details-header">
+              <div>
+                <div class="proof-kicker">Interactive Proof Stage</div>
+                <h2 id="proof-title">Geometric Proof</h2>
+              </div>
+              <div id="proof-relic-badge" class="relic-badge hidden"></div>
+            </div>
+            <div id="proof-steps" class="proof-steps"></div>
+          </div>
+        </section>
+      </div>
+      <div class="modal-actions proof-actions">
+        <button id="proof-accept" class="primary">Accept Seal &amp; Continue</button>
       </div>
     </div>
   </div>
@@ -210,6 +239,8 @@
     </div>
   </div>
 
-  <script type="module" src="app.js"></script>
+  <script src="vendor/katex/katex.min.js"></script>
+  <script src="vendor/katex/contrib/auto-render.min.js"></script>
+  <script type="module" src="app.js?v=1.0.0"></script>
 </body>
 </html>

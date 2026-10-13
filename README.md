@@ -6,6 +6,14 @@
 
 # The Curved World
 
+## 一键启动
+
+```powershell
+python -m src.main --serve --port 8000
+```
+
+浏览器打开 `http://127.0.0.1:8000/` 即可进入本地 Web 双视角界面。
+
 > 一个数学探索原型：玩家在一块嵌入三维欧氏空间的**光滑曲面**上移动，用**距离敏感探测器**（只能读到信号强弱）寻找隐藏出口。
 
 本目录遵循 `AGENTS.md` 的协作规范与安全边界。实现进度以本文件「功能状态表」为准，未完成项均如实标注。
@@ -35,6 +43,15 @@
 
 > **范围声明**：本版本实现的是**嵌入普通三维欧氏空间的光滑曲面** + **基于环境欧氏距离的探测器**；它**不是**完整的非欧几何物理仿真。
 
+## 五大微分几何任务与数学定理
+
+| Quest | 任务类型 | 核心数学定理 / 判据 |
+| :--- | :--- | :--- |
+| Gauss-Bonnet | 角盈 / 角亏双向 | `sum(theta_i) - pi = iint_Delta K dA`；正曲率给角盈，负曲率鞍区给角亏 |
+| Bertrand-Diquet-Puisseux | 测地圆周收缩 | `C(r) = 2*pi*r - (pi/3) K r^3 + O(r^4)` |
+| Levi-Civita Holonomy | 平行移动和乐角 | `Delta alpha = iint_Omega K dA (mod 2*pi)` |
+| Parabolic Seam | 零曲率分界线 | `K = kappa_1 * kappa_2 = 0`，且渐近方向满足 `II(v, v) = 0` |
+| Homotopy Loop | 不可缩环与缠绕数 | `pi_1(T^2) = Z + Z`，非零整数缠绕数阻止环缩为单点 |
 ## 数学模型
 
 世界是一张**图曲面**，嵌入普通三维欧氏空间：
@@ -959,4 +976,4 @@ powershell
 - 服务端与前端通过同一能力矩阵驱动工具，不再为单张地图写特殊分支。
 - 支持 Klein Bottle、传统 Klein Bottle、Knotted Torus、Elliptic Curve、Real Projective Plane 的 chart periods / chart copies / orbit-min 距离。
 - 跨地图测试验证：三角闭合与拉圆、量绳、节点距离、顶点角、角和、三角测量，以及适用任务链解锁出口后能够通关。
-- 当前全量测试：250 passed。
+- 当前全量测试：261 passed。
