@@ -227,7 +227,7 @@ least one automated test or an audited payload check behind it.
 | Detector measurement noise / error model | `detector.py` | ⏳ Not implemented - the detector is deterministic by design |
 | Geodesic physics for player locomotion | `gameplay.py` | ⏳ Not implemented - movement is parameter-space kinematics with slope damping |
 | Audio, save/load slots, multiplayer, extra languages | - | ⏳ Not implemented |
-| Hand-captured browser screenshots and the 3-minute demo recording | `screenshots/`, `demo/` | ⚠️ Partly - headless renders are committed; browser captures and the recording are still pending |
+| Browser screenshots and the 3-minute demo recording | `screenshots/`, `demo/` | ✅ Implemented - 8 screenshots (3 head-less renders plus 5 browser captures) and a 2:59.88 demo recording |
 
 ## Installation & Testing
 
@@ -249,6 +249,10 @@ The fixed seed `12345` provides a deterministic end-to-end demonstration:
 
 The script prints real detector readings while moving, placing markers, measuring, and
 approaching the hidden exit in a controlled developer-assisted sequence.
+
+A 2:59.88 screen recording of a full session is shipped in `demo/`; the segment from 1:10 to
+2:00 plays at three times speed so the tour fits inside three minutes. See `DEMO_LINK.md`
+for the recording script and the map notes.
 
 ## Comparison with Related Works (相近已有作品对比)
 
@@ -329,7 +333,7 @@ What this project does that the above do not combine:
 | Source code | `src/`, `web/`, `tests/` | 269 automated tests plus `node --check web/app.js` |
 | Documentation | `README.md`, `README_CN.md`, `docs/` | English main README plus a full Chinese translation |
 | AI collaboration log | `AI_USAGE.md`, `ai-logs/` | Per-task record of AI-assisted work |
-| Runtime screenshots | `screenshots/` | 3 to 8 images: lobby, tangent-map roaming with hillshading, rope survey, proof stage, victory settlement |
+| Runtime screenshots | `screenshots/` | 8 images: three head-less renders plus the lobby, three live player views (roaming, tool readouts, survey overlays) and the omniscient view |
 | Demo | `demo/`, `DEMO_LINK.md` | 3-minute recording or an external link, plus a suggested recording script |
 | Email package | `submission/TheCurvedWorld_MidnightAcademy_Submission.zip` | Rebuild with `make package` (`scripts/package_submission.py`) |
 
@@ -343,3 +347,7 @@ What this project does that the above do not combine:
 - `double_torus` is a genus-2 visual approximation; the chart remains genus 1.
 - Hard mode is intentionally severe: it combines a 500 m rope pool, eight marker pegs and a
   quest countdown.
+- The eye pointer (three limited uses, a quantised tangent-plane bearing) is implemented in
+  the server kernel and its counter is shown in the HUD, but the current web build exposes
+  no button or key for it: the `1`-`5` hotbar is Detector / Marker Peg / Rope / Measure /
+  Codex. The lobby label that still says "eye pointer" is legacy wording.

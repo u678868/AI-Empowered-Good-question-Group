@@ -1,7 +1,7 @@
 [project]
-name = "ai-empowered"
-version = "0.1.0"
-description = "AI Empowered 竞赛项目脚手架"
+name = "the-curved-world"
+version = "1.0.0"
+description = "The Curved World - a differential-geometry exploration game for The Midnight Academy"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []

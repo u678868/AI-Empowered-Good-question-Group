@@ -1,5 +1,11 @@
 # Task 4 — Final Validation Report
 
+> **HISTORICAL MILESTONE REPORT (Task 1-4, superseded).** This document records an early
+> milestone and therefore still describes the older prototype: no Web layer, no
+> `manifold.py` / `quest.py` / `ropes.py` modules and 70 tests. It is kept for the record.
+> For the current architecture, feature status, screenshots, demo and the 269-test
+> regression, see `README.md` (and `README_CN.md` for the Chinese version).
+
 This report covers the whole prototype (Task 1-4). It is written to be honest:
 things that were not tested are not claimed to work.
 

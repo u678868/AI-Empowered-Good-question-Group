@@ -187,10 +187,11 @@ def relative_targets() -> dict[Path, Path]:
 
 def sync_mirror() -> int:
     targets = relative_targets()
+    target_names = {item.as_posix() for item in targets}
     if MIRROR.exists():
         for path in sorted(mirror_entries(), key=lambda item: item.relative_to(MIRROR).as_posix(), reverse=True):
             rel = path.relative_to(MIRROR)
-            if rel.as_posix() in targets or rel.name in (ARCHIVE_NAME, *GENERATED_KEEP):
+            if rel.as_posix() in target_names or rel.name in (ARCHIVE_NAME, *GENERATED_KEEP):
                 continue
             # A stale mirror entry would otherwise be pushed again.
             print(f"  [remove] submission/{rel.as_posix()}")
