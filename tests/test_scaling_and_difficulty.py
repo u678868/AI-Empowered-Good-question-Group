@@ -80,14 +80,18 @@ def test_medium_difficulty_silences_the_player_detector() -> None:
     assert "true_distance" not in state
 
 
-def test_hard_difficulty_is_a_reserved_placeholder() -> None:
+def test_hard_difficulty_activates_survival_mode() -> None:
     session = GameSession(seed=12345, difficulty="hard")
     state = session.player_state()
     assert state["difficulty"] == "hard"
-    assert state["difficulty_reserved"] is True
+    assert state["difficulty_reserved"] is False
+    assert state["difficulty_active"] is True
     assert state["signal"] == 0.0
-    assert state["label"] == "Reserved"
+    assert state["label"] == "Offline"
     assert state["trend"] == "same"
+    assert state["rope_total"] == 500.0
+    assert state["max_markers_allowed"] == 8
+    assert state["time_limit"] == 240.0
     # the world is still playable: a step is accepted and the exit rule still runs
     result = session.game.move(1.0, 0.0)
     assert result.moved is True
@@ -113,7 +117,7 @@ def test_invalid_scale_and_difficulty_are_rejected() -> None:
         session.reset_world(difficulty="nope")
 
 
-def test_score_inputs_are_tracked_and_score_is_a_placeholder() -> None:
+def test_score_inputs_are_tracked_and_score_breakdown_is_structured() -> None:
     session = GameSession(seed=12345)
     game = session.game
     game.move(1.0, 0.3)
@@ -124,7 +128,10 @@ def test_score_inputs_are_tracked_and_score_is_a_placeholder() -> None:
     game.record_tool_usage("curvature")
 
     state = session.player_state()
-    assert state["score"] == 0.0
+    assert state["score"] >= 100
+    assert state["rank"] in ("S", "A", "B", "C")
+    assert "score_breakdown" in state
+    assert state["score_breakdown"]["total_score"] == state["score"]
     assert state["effective_steps"] > 0.0
     assert state["effective_steps"] >= 2.0  # uphill damping never discounts below 1/step
     assert state["tool_usages"]["detector"] == 1
@@ -134,8 +141,8 @@ def test_score_inputs_are_tracked_and_score_is_a_placeholder() -> None:
     assert state["tool_usages"]["triangle"] == 0
     assert set(state["tool_usages"]) == {"detector", "pointer", "curvature", "triangle", "marker"}
 
-    # the reserved hook is callable and explicitly returns the placeholder value
-    assert game.calculate_score() == 0.0
+    # the scoring hook returns the structured ledger and agrees with the payload
+    assert game.calculate_score()["total_score"] == state["score"]
 
 
 def test_default_world_config_keeps_the_task16_baseline() -> None:

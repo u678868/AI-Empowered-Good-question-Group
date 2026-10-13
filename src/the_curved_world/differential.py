@@ -174,6 +174,34 @@ def principal_curvatures(surface, u: float, v: float) -> Tuple[float, float]:
     return float(values[0]), float(values[1])
 
 
+def asymptotic_direction(surface, u: float, v: float) -> Tuple[float, float]:
+    """Return the parameter-space direction of the smallest principal curvature.
+
+    At a parabolic point one eigenvalue of ``I^{-1} II`` is zero; its
+    eigenvector is therefore a null direction of the second fundamental form.
+    The returned vector is normalized and given a deterministic sign.
+    """
+    e, f, g = surface.first_fundamental_form(float(u), float(v))
+    l, m, n = surface.second_fundamental_form(float(u), float(v))
+    first = np.array([[float(e), float(f)], [float(f), float(g)]], dtype=float)
+    second = np.array([[float(l), float(m)], [float(m), float(n)]], dtype=float)
+    try:
+        shape = np.linalg.pinv(first, rcond=1e-12) @ second
+        eigenvalues, eigenvectors = np.linalg.eig(shape)
+    except np.linalg.LinAlgError:
+        return 1.0, 0.0
+    index = int(np.argmin(np.abs(np.real(eigenvalues))))
+    direction = np.real(eigenvectors[:, index]).astype(float)
+    norm = float(np.linalg.norm(direction))
+    if not np.isfinite(norm) or norm <= 1e-12:
+        direction = np.array([1.0, 0.0], dtype=float)
+    else:
+        direction = direction / norm
+    if direction[0] < 0.0 or (abs(direction[0]) <= 1e-12 and direction[1] < 0.0):
+        direction = -direction
+    return float(direction[0]), float(direction[1])
+
+
 def loop_polygon(surface, center: Sequence[float], radius: float, count: int = 8) -> list:
     """Return a closed parameter polygon around ``center`` (diagnostic helper)."""
     count = max(3, int(count))
@@ -190,6 +218,7 @@ def loop_polygon(surface, center: Sequence[float], radius: float, count: int = 8
 
 
 __all__ = [
+    "asymptotic_direction",
     "christoffel_symbols",
     "loop_polygon",
     "metric_inner",

@@ -64,6 +64,10 @@ const state = {
   difficulty: 'easy',
   readings: 0,
   victoryShown: false,
+  defeatShown: false,
+  timeRemaining: null,
+  timeRemainingAt: 0,
+  timerQuestId: null,
   cleared: false,
   startedAt: 0,
   compassPulse: 0,
@@ -100,6 +104,25 @@ function clamp(value, low, high) {
   return Math.min(high, Math.max(low, value));
 }
 
+function finiteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function formatAngle(value, digits = 1, fallback = '-') {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(digits)} deg` : fallback;
+}
+
+function formatLength(value, digits = 2, fallback = '-') {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(digits)} m` : fallback;
+}
+
+function formatCurvature(value, digits = 5, fallback = '-') {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(digits)} m\u207b\u00b2` : fallback;
+}
 function wrapParameter(value) {
   return ((value + Math.PI) % TWO_PI + TWO_PI) % TWO_PI - Math.PI;
 }
@@ -196,6 +219,7 @@ const GRASS_LOW = [61, 126, 52];
 const GRASS_HIGH = [104, 170, 74];
 const GRASS_DRY = [178, 184, 104];
 const GRASS_ROCK = [78, 88, 60];
+const HILLSHADE_LIGHT = normalize3([-1 / Math.sqrt(3), -1 / Math.sqrt(3), 1 / Math.sqrt(3)]);
 
 // Grassland biome shading: height blends the green, steep ground turns mossy,
 // and high dry ridges pick up a faint straw tint. Returns an [r, g, b] triple
@@ -380,7 +404,6 @@ function buildTerrain(patch) {
   const stride = nx > 40 ? 2 : 1;
   const [zLow, zHigh] = zRange(patch);
   const span = Math.max(1e-9, zHigh - zLow);
-  const light = normalize3([-0.35, 0.5, 0.79]);
   const grid = [];
   for (let j = 0; j < ny; j += stride) {
     const row = [];
@@ -403,9 +426,9 @@ function buildTerrain(patch) {
       ];
       let normal = normalize3(cross(ru, rv));
       if (normal[2] < 0) normal = normal.map((value) => -value);
-      const shade = 0.62 + 0.38 * Math.max(0, dot(normal, light));
       const steep = Math.sqrt(Math.max(0, patch.E[j][i] - 1) + Math.max(0, patch.G[j][i] - 1));
-      const rgb = grassRGB((patch.z[j][i] - zLow) / span, steep).map((value) => clamp(value * shade, 0, 255));
+      const elevation = clamp((patch.z[j][i] - zLow) / span, 0, 1);
+      const rgb = grassRGB(elevation, steep).map((value) => clamp(value * (0.78 + 0.44 * elevation), 0, 255));
       row.push({ x: patch.x[i], y: patch.y[j], z: patch.z[j][i], rgb });
     }
     grid.push(row);
@@ -413,6 +436,60 @@ function buildTerrain(patch) {
   const levels = [];
   for (let k = 1; k <= 7; k += 1) levels.push(zLow + span * k / 8);
   return { grid, contours: buildContours(grid, levels), zLow, zHigh };
+}
+
+// GIS-style Lambertian hillshading: light from the north-west, natural grass
+// brightening on sun-facing slopes and soft shadow in windward troughs.
+function applyHillshading(ctx, patch) {
+  const view = state.mapView;
+  if (!view || !patch || !patch.x || !patch.X) return;
+  const project = (u, v) => {
+    const [du, dv] = chartDelta(u, v, view.phys[0], view.phys[1]);
+    return [view.cx + du * view.scale, view.cy - dv * view.scale];
+  };
+  const nx = patch.x.length;
+  const ny = patch.y.length;
+  const stride = nx > 40 ? 2 : 1;
+  for (let j = 0; j < ny - stride; j += stride) {
+    for (let i = 0; i < nx - stride; i += stride) {
+      const i0 = Math.max(0, i - 1);
+      const i1 = Math.min(nx - 1, i + 1);
+      const j0 = Math.max(0, j - 1);
+      const j1 = Math.min(ny - 1, j + 1);
+      const du = (patch.x[i1] - patch.x[i0]) || 1e-9;
+      const dv = (patch.y[j1] - patch.y[j0]) || 1e-9;
+      const ru = [
+        (patch.X[j][i1] - patch.X[j][i0]) / du,
+        (patch.Y[j][i1] - patch.Y[j][i0]) / du,
+        (patch.z[j][i1] - patch.z[j][i0]) / du,
+      ];
+      const rv = [
+        (patch.X[j1][i] - patch.X[j0][i]) / dv,
+        (patch.Y[j1][i] - patch.Y[j0][i]) / dv,
+        (patch.z[j1][i] - patch.z[j0][i]) / dv,
+      ];
+      let normal = normalize3(cross(ru, rv));
+      if (normal[2] < 0) normal = normal.map((value) => -value);
+      const intensity = clamp(dot(normal, HILLSHADE_LIGHT), 0.55, 1.15);
+      const delta = intensity - 1.0;
+      if (Math.abs(delta) < 0.008) continue;
+      const alpha = clamp(Math.abs(delta) * 0.62, 0, 0.30);
+      const p0 = project(patch.x[i], patch.y[j]);
+      const p1 = project(patch.x[Math.min(nx - 1, i + stride)], patch.y[j]);
+      const p2 = project(patch.x[Math.min(nx - 1, i + stride)], patch.y[Math.min(ny - 1, j + stride)]);
+      const p3 = project(patch.x[i], patch.y[Math.min(ny - 1, j + stride)]);
+      ctx.fillStyle = delta > 0 ? `rgba(255,255,255,${alpha})` : `rgba(0,0,0,${alpha})`;
+
+
+      ctx.beginPath();
+      ctx.moveTo(p0[0], p0[1]);
+      ctx.lineTo(p1[0], p1[1]);
+      ctx.lineTo(p2[0], p2[1]);
+      ctx.lineTo(p3[0], p3[1]);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
 }
 
 // ------------------------------------------------- collision geometry -----
@@ -634,6 +711,8 @@ function drawTopDownWorld() {
     }
   }
 
+  applyHillshading(ctx, patch);
+
   // 2. Semi-transparent contour lines: the topography is visible, the global
   //    topology is not.
   ctx.strokeStyle = 'rgba(244, 248, 220, 0.20)';
@@ -718,7 +797,7 @@ function drawTopDownWorld() {
       const my = (pa[1] + pb[1]) / 2;
       ctx.fillStyle = 'rgba(230, 240, 255, 0.85)';
       ctx.font = '11px monospace';
-      ctx.fillText(state.lastMeasure.distance.toFixed(2), mx + 6, my - 4);
+      ctx.fillText(formatLength(state.lastMeasure.distance, 2), mx + 6, my - 4);
     }
   }
 
@@ -765,7 +844,7 @@ function drawTopDownWorld() {
     const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
     ctx.fillStyle = 'rgba(255, 214, 102, 0.85)';
     ctx.font = '11px monospace';
-    ctx.fillText(`${rope.length_3d.toFixed(1)}m`, mid[0] + 5, mid[1] - 4);
+    ctx.fillText(formatLength(rope.length_3d, 2), mid[0] + 5, mid[1] - 4);
     state.hitRopes.push({ id: rope.id, a, b });
   }
 
@@ -794,7 +873,7 @@ function drawTopDownWorld() {
     const labelPoint = points[0];
     ctx.fillStyle = 'rgba(255, 214, 102, 0.95)';
     ctx.font = '11px monospace';
-    ctx.fillText(`Circumcircle: C = ${Number(circle.perimeter).toFixed(1)} m`, labelPoint[0] + 6, labelPoint[1] - 8);
+    ctx.fillText(`Circumcircle: C = ${formatLength(Number(circle.perimeter), 2)}`, labelPoint[0] + 6, labelPoint[1] - 8);
     state.hitCircumcircles.push({ id: circle.id, points });
   }
   if (state.ropeMode && state.hoverTriangle) {
@@ -934,7 +1013,7 @@ function drawTopDownWorld() {
   // Compact HUD.
   ctx.fillStyle = 'rgba(232, 242, 228, 0.72)';
   ctx.font = '12px monospace';
-  ctx.fillText(`heading ${(PHYS.heading * 180 / Math.PI).toFixed(1)} deg`, 14, 22);
+  ctx.fillText(`heading ${formatAngle(PHYS.heading * 180 / Math.PI, 1)}`, 14, 22);
   const slope = PHYS.slope || { slope: 0, speed_scale: 1 };
   ctx.fillText(`slope ${slope.slope >= 0 ? '+' : ''}${slope.slope.toFixed(3)}  x${slope.speed_scale.toFixed(2)}`, 14, H - 14);
   if (PHYS.hitFlash > 0) {
@@ -1157,6 +1236,29 @@ function applySnapshot(snapshot) {
   if (typeof state.player.difficulty === 'string') {
     state.difficulty = state.player.difficulty;
   }
+  if (Object.prototype.hasOwnProperty.call(snapshot, 'time_remaining')) {
+    if (typeof snapshot.time_remaining === 'number') {
+      const serverRemaining = Number(snapshot.time_remaining);
+      const localRemaining = currentTimeRemaining();
+      const questId = snapshot.quest && snapshot.quest.id ? String(snapshot.quest.id) : null;
+      const questLabel = (snapshot.quest && (snapshot.quest.title || snapshot.quest.id)) || 'New trial';
+      const questChanged = questId !== null && questId !== state.timerQuestId;
+      // The countdown is monotonic: a stale or duplicated payload can never push it
+      // back up. The only legitimate restart is a brand new trial being accepted, so
+      // that restart is announced in the hint area and is never a surprise.
+      const restarted = questChanged && localRemaining !== null && serverRemaining > localRemaining + 0.5;
+      if (state.timeRemaining === null || localRemaining === null || questChanged || serverRemaining <= localRemaining + 0.05) {
+        state.timeRemaining = serverRemaining;
+        state.timeRemainingAt = performance.now();
+        if (restarted) hintMessage(`${questLabel} accepted - Hard-mode countdown restarts at full time.`, 'info');
+      }
+      if (questId !== null) state.timerQuestId = questId;
+    } else {
+      state.timeRemaining = null;
+      state.timeRemainingAt = 0;
+      state.timerQuestId = null;
+    }
+  }
   syncDetectorLock();
   state.terrainCache = null;
   maybeShowQuestProof();
@@ -1168,11 +1270,18 @@ function applySnapshot(snapshot) {
     PHYS.uv = state.player.position.slice();
   }
   maybeShowVictory();
+  maybeShowDefeat();
 }
 
 async function refreshState() {
   applySnapshot(await apiGet('/api/state/player'));
   renderAll();
+}
+
+function currentTimeRemaining() {
+  if (state.difficulty !== 'hard' || typeof state.timeRemaining !== 'number') return null;
+  const elapsed = (performance.now() - (state.timeRemainingAt || performance.now())) / 1000;
+  return Math.max(0, state.timeRemaining - elapsed);
 }
 
 function formatDuration(seconds) {
@@ -1193,6 +1302,57 @@ function topologyLabel(mapId) {
 
 // Task 16: when the server reports the hidden exit was reached, raise the
 // victory modal once, with an honest summary of the player's own run.
+function renderVictoryRelics() {
+  const container = el('victory-relics');
+  if (!container) return;
+  container.innerHTML = '';
+  const quest = state.player && state.player.quest;
+  const relics = (quest && quest.relics) || [];
+  if (!relics.length) {
+    const empty = document.createElement('div');
+    empty.className = 'victory-relic empty';
+    empty.textContent = 'No geometric relics';
+    container.appendChild(empty);
+    return;
+  }
+  for (const relic of relics) {
+    const card = document.createElement('div');
+    card.className = 'victory-relic';
+    card.textContent = String(relic);
+    container.appendChild(card);
+  }
+}
+
+const RANK_TITLES = {
+  S: 'Archimedean Grandmaster',
+  A: 'Geodesic Scholar',
+  B: 'Manifold Surveyor',
+  C: 'Academy Initiate',
+};
+
+function rankTitle(rank) {
+  return RANK_TITLES[rank] || RANK_TITLES.C;
+}
+
+function renderVictoryScore(p) {
+  const score = p.score_breakdown || {};
+  const data = score.breakdown || {};
+  const multipliers = data.multipliers || {};
+  const total = Number(score.total_score ?? p.score ?? 0);
+  const rank = score.rank || p.rank || 'C';
+  el('victory-rank').textContent = `Rank: ${rank} [${rankTitle(rank)}]`;
+  const row = (label, value, totalRow) => `<div class="score-row${totalRow ? ' total' : ''}"><span>${label}</span><strong>${value}</strong></div>`;
+  el('victory-breakdown').innerHTML = [
+    row('Base Clearance', `+${Math.round(Number(data.base) || 0)}`),
+    row('Time Efficiency', `+${Math.round(Number(data.time_bonus) || 0)} (Time: ${formatDuration(Number(p.elapsed_time) || 0)})`),
+    row('Frugal Surveyor', `+${Math.round((Number(data.marker_bonus) || 0) + (Number(data.rope_bonus) || 0))} (Pegs: ${Number(data.marker_count) || 0}, Rope Left: ${proofFormat(data.rope_remaining, 2)} m)`),
+    row('Tool Discipline', `+${Math.round(Number(data.tool_bonus) || 0)} (${Number(data.measure_calls) || 0} calls)`),
+    row('Path Exhaustion', `-${Math.round(Number(data.step_penalty) || 0)} (Effective Steps ${proofFormat(data.effective_steps, 1)})`),
+    row('Difficulty & Scale Multiplier', `x${proofFormat(multipliers.combined, 2)} (${difficultyLabel(multipliers.difficulty || state.difficulty)} x ${proofFormat(multipliers.scale_mult, 2)})`),
+    row('Final Score', `${Math.round(total)}`, true),
+  ].join('');
+  el('victory-score').textContent = `${Math.round(total)}`;
+}
 function maybeShowVictory() {
   const p = state.player;
   if (!p || !p.won || state.victoryShown) return;
@@ -1206,13 +1366,29 @@ function maybeShowVictory() {
   el('victory-seed').textContent = `${p.seed}`;
   el('victory-difficulty').textContent = difficultyLabel(state.difficulty);
   el('victory-scale').textContent = `${(state.scaleFactor || 1).toFixed(2)}x`;
-  el('victory-score').textContent = `${Math.round(p.score || 0)}`;
+  renderVictoryScore(p);
+  renderVictoryRelics();
   el('victory-modal').classList.remove('hidden');
   message('Exit found - the victory summary is open.', 'ok');
 }
 
 function hideVictory() {
   el('victory-modal').classList.add('hidden');
+}
+
+function maybeShowDefeat() {
+  const p = state.player;
+  const remaining = currentTimeRemaining();
+  const expired = Boolean(p && (p.is_time_expired || (remaining !== null && remaining <= 0)));
+  if (!p || !expired || state.defeatShown) return;
+  state.defeatShown = true;
+  el('defeat-modal').classList.remove('hidden');
+  hintMessage('Trial expired - singular collapse.', 'error', true);
+}
+
+function continueAfterDefeat() {
+  el('defeat-modal').classList.add('hidden');
+  message('World remains open in defeated free roam.', 'error');
 }
 
 
@@ -1223,6 +1399,14 @@ function renderQuest() {
   if (!quest) return;
   const relics = quest.relics || [];
   el('quest-relic-count').textContent = `${relics.length} seal${relics.length === 1 ? '' : 's'}`;
+  const remaining = currentTimeRemaining();
+  const timer = el('quest-timer');
+  if (timer) {
+    const showTimer = state.difficulty === 'hard' && typeof remaining === 'number';
+    timer.classList.toggle('hidden', !showTimer);
+    timer.classList.toggle('warning', showTimer && remaining <= 30);
+    timer.textContent = showTimer ? `Time Remaining: ${formatDuration(remaining)}` : 'Time Remaining: --:--';
+  }
   el('quest-title').textContent = quest.title || 'No active quest';
   el('quest-description').textContent = quest.description || '';
   el('quest-hint').textContent = quest.hint || '';
@@ -1248,7 +1432,8 @@ function renderQuest() {
       el('quest-progress-label').textContent = `Circumnavigation Phase: ${shown} pi / ${target.toFixed(2)} pi (Return to origin to seal)`;
     } else {
       const shown = typeof current === 'number' ? current.toFixed(1) : '-';
-      el('quest-progress-label').textContent = `${label}: ${shown} / ${target.toFixed(1)} deg`;
+      const relation = quest.objective_relation === '<=' ? '<=' : '>=';
+      el('quest-progress-label').textContent = `${label}: ${shown} ${relation} ${target.toFixed(1)} deg`;
     }
   } else {
     el('quest-objective').textContent = 'Objective';
@@ -1356,7 +1541,7 @@ async function runQuestAction() {
       });
       await applyQuestMeasurement(
         result,
-        `Parabolic pegs: ${((result.curvatures || []).length)} readings, minimum spacing ${Math.min(...(result.pairwise_distances || [0])).toFixed(3)} m.`
+        `Parabolic pegs: ${((result.curvatures || []).length)} readings, minimum spacing ${formatLength(Math.min(...(result.pairwise_distances || [0])), 2)}.`
       );
       return;
     }
@@ -1381,370 +1566,1381 @@ async function runQuestAction() {
   }
 }
 
-let proofFrame = null;
+function drawProofFrame(ctx, W, H, clock, timeline, highlight) {
+  drawProofBackdrop(ctx, W, H, clock);
+  const proof = state.proof || {};
+  const kind = proof.kind || 'gauss_bonnet_excess';
+  if (kind === 'bdp_circle_deficit') {
+    drawBdpProofStage(ctx, W, H, clock, timeline || {}, proof, highlight);
+    return;
+  }
+  if (kind === 'holonomy_loop') {
+    drawHolonomyProofStage(ctx, W, H, clock, timeline || {}, proof, highlight);
+    return;
+  }
+  if (kind === 'parabolic_line') {
+    drawParabolicProofStage(ctx, W, H, clock, timeline || {}, proof, highlight);
+    return;
+  }
+  if (kind === 'homotopy_loop') {
+    drawHomotopyProofStage(ctx, W, H, clock, timeline || {}, proof, highlight);
+    return;
+  }
+  drawGaussProofStage(ctx, W, H, clock, timeline || {}, proof, highlight);
+}
 
-function drawProofFrame(ctx, W, H, time) {
+function drawProofBackdrop(ctx, W, H, clock) {
   const bg = ctx.createLinearGradient(0, 0, 0, H);
   bg.addColorStop(0, '#101823');
-  bg.addColorStop(1, '#0a0f16');
+  bg.addColorStop(1, '#070b11');
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, W, H);
 
+  ctx.save();
+  ctx.globalAlpha = 0.62;
   ctx.strokeStyle = 'rgba(120, 160, 200, 0.16)';
   ctx.lineWidth = 1;
-  for (let gx = 20; gx <= W; gx += 40) {
+  for (let gx = 20; gx <= W; gx += 42) {
     ctx.beginPath();
-    for (let y = 0; y <= H; y += 8) {
-      const x = gx + 10 * Math.sin((y / H) * Math.PI + gx * 0.02 + time * 0.4);
+    for (let y = 0; y <= H; y += 10) {
+      const x = gx + 9 * Math.sin((y / Math.max(H, 1)) * Math.PI + gx * 0.018 + clock * 0.22);
       if (y === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.stroke();
   }
-  for (let gy = 20; gy <= H; gy += 40) {
+  for (let gy = 20; gy <= H; gy += 42) {
     ctx.beginPath();
-    for (let x = 0; x <= W; x += 8) {
-      const y = gy + 9 * Math.cos((x / W) * Math.PI + gy * 0.02 + time * 0.4);
+    for (let x = 0; x <= W; x += 10) {
+      const y = gy + 8 * Math.cos((x / Math.max(W, 1)) * Math.PI + gy * 0.018 + clock * 0.22);
       if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.stroke();
   }
+  ctx.restore();
+}
 
-  const proofKind = ((state.proof || {}).kind) || 'gauss_bonnet_excess';
-  if (proofKind === 'bdp_circle_deficit') {
-    drawBdpProofFrame(ctx, W, H, time, state.proof || {});
-    return;
+const PROOF_DURATION_MS = 4200;
+let proofAnimator = null;
+
+function easeInOutCubic(t) {
+  const x = clamp(t, 0, 1);
+  return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+}
+
+function proofNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function proofFormat(value, digits = 3, fallback = '-') {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : fallback;
+}
+
+function proofLerp(a, b, t) {
+  return a + (b - a) * clamp(t, 0, 1);
+}
+
+function proofPhase(timeline, start, end) {
+  const progress = clamp((timeline && timeline.progress) || 0, 0, 1);
+  if (progress <= start) return 0;
+  if (progress >= end) return 1;
+  return (progress - start) / Math.max(1e-9, end - start);
+}
+
+function proofMath(container, latex, options = {}) {
+  const box = document.createElement('div');
+  box.className = 'proof-formula';
+  if (options.highlight) {
+    box.dataset.proofHighlight = options.highlight;
+    box.title = 'Hover to highlight the matching geometry.';
   }
-  if (proofKind === 'holonomy_loop') {
-    drawHolonomyProofFrame(ctx, W, H, time, state.proof || {});
-    return;
+  try {
+    if (window.katex && typeof window.katex.render === 'function') {
+      window.katex.render(latex, box, {
+        displayMode: options.displayMode !== false,
+        throwOnError: false,
+        strict: false,
+      });
+    } else {
+      box.textContent = latex;
+      box.classList.add('proof-formula-fallback');
+    }
+  } catch (error) {
+    box.textContent = latex;
+    box.classList.add('proof-formula-fallback');
   }
-  if (proofKind === 'parabolic_line') {
-    drawParabolicProofFrame(ctx, W, H, time, state.proof || {});
-    return;
+  container.appendChild(box);
+  return box;
+}
+
+function proofText(container, text) {
+  const paragraph = document.createElement('p');
+  paragraph.textContent = text;
+  container.appendChild(paragraph);
+  return paragraph;
+}
+
+function proofCard(title) {
+  const card = document.createElement('section');
+  card.className = 'proof-step-card';
+  const heading = document.createElement('h3');
+  heading.textContent = title;
+  card.appendChild(heading);
+  return card;
+}
+
+function proofValueGrid(entries) {
+  const grid = document.createElement('div');
+  grid.className = 'proof-value-grid';
+  for (const entry of entries) {
+    const value = document.createElement('div');
+    value.className = 'proof-value';
+    value.textContent = entry[0];
+    const strong = document.createElement('strong');
+    strong.textContent = entry[1];
+    value.appendChild(strong);
+    grid.appendChild(value);
   }
-  if (proofKind === 'homotopy_loop') {
-    drawHomotopyProofFrame(ctx, W, H, time, state.proof || {});
-    return;
+  return grid;
+}
+
+function renderProofMath(root) {
+  if (window.renderMathInElement && root) {
+    try {
+      window.renderMathInElement(root, {
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '$', right: '$', display: false },
+        ],
+        throwOnError: false,
+      });
+    } catch (error) {
+      // Dynamic formulas are already rendered individually; this is a fallback.
+    }
+  }
+}
+
+class ProofAnimator {
+  constructor(canvas, proof) {
+    this.canvas = canvas;
+    this.proof = proof || {};
+    this.ctx = canvas ? canvas.getContext('2d') : null;
+    this.frameId = null;
+    this.running = false;
+    this.highlight = null;
+    this.progress = 0;
+    this.phase = 0;
+    this.local = 0;
+    this.W = 720;
+    this.H = 520;
+    this.started = performance.now();
+    this.tick = this.tick.bind(this);
+    this.resize();
   }
 
-  const cx = W / 2;
-  const cy = H / 2 + 6;
-  const pulse = 1 + 0.06 * Math.sin(time * 2.2);
-  const radius = Math.min(W, H) * 0.30 * pulse;
-  const vertices = [0, 1, 2].map((k) => {
-    const angle = -Math.PI / 2 + k * 2 * Math.PI / 3;
-    return [cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)];
+  resize() {
+    if (!this.canvas || !this.ctx) return;
+    const stage = el('proof-stage');
+    const stageWidth = stage && stage.clientWidth ? stage.clientWidth - 44 : this.W;
+    const cssWidth = clamp(Math.round(stageWidth || 720), 320, 900);
+    const cssHeight = clamp(Math.round(cssWidth * 0.72), 320, 560);
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    this.W = cssWidth;
+    this.H = cssHeight;
+    this.canvas.width = Math.round(cssWidth * ratio);
+    this.canvas.height = Math.round(cssHeight * ratio);
+    this.canvas.style.height = `${cssHeight}px`;
+    this.ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  }
+
+  start() {
+    this.stop();
+    this.started = performance.now();
+    this.progress = 0;
+    this.phase = 0;
+    this.local = 0;
+    this.running = true;
+    this.frameId = window.requestAnimationFrame(this.tick);
+  }
+
+  stop() {
+    this.running = false;
+    if (this.frameId !== null) window.cancelAnimationFrame(this.frameId);
+    this.frameId = null;
+  }
+
+  replay() {
+    this.start();
+  }
+
+  setStep(index) {
+    const step = clamp(Number(index) || 0, 0, 2);
+    this.started = performance.now() - (step / 3) * PROOF_DURATION_MS;
+    if (!this.running) this.start();
+  }
+
+  setHighlight(target) {
+    this.highlight = target || null;
+    for (const formula of document.querySelectorAll('.proof-formula[data-proof-highlight]')) {
+      formula.classList.toggle('is-highlighted', formula.dataset.proofHighlight === this.highlight);
+    }
+  }
+
+  tick(now) {
+    if (!this.running || !this.ctx) return;
+    const elapsed = clamp(now - this.started, 0, PROOF_DURATION_MS);
+    this.progress = elapsed / PROOF_DURATION_MS;
+    this.phase = Math.min(2, Math.floor(this.progress * 3));
+    this.local = clamp(this.progress * 3 - this.phase, 0, 1);
+    this.updateStepDots();
+    drawProofFrame(
+      this.ctx,
+      this.W,
+      this.H,
+      now / 1000,
+      { progress: this.progress, phase: this.phase, local: this.local },
+      this.highlight,
+    );
+    this.frameId = window.requestAnimationFrame(this.tick);
+  }
+
+  updateStepDots() {
+    const dots = document.querySelectorAll('#proof-step-dots [data-step]');
+    dots.forEach((dot) => {
+      dot.classList.toggle('active', Number(dot.dataset.step) === this.phase);
+    });
+  }
+}
+
+function proofStepLabels(kind, isDeficit = false) {
+  if (kind === 'gauss_bonnet_excess') return isDeficit ? ['01 Euclidean', '02 Deficit', '03 Negative Flux'] : ['01 Euclidean', '02 Excess', '03 Flux'];
+  if (kind === 'bdp_circle_deficit') return ['01 Reference', '02 Cinch', '03 Deficit'];
+  if (kind === 'holonomy_loop') return ['01 Loop', '02 Transport', '03 Flux'];
+  if (kind === 'parabolic_line') return ['01 Surface', '02 Seam', '03 Asymptotic'];
+  if (kind === 'homotopy_loop') return ['01 Torus', '02 Winding', '03 Obstruction'];
+  return ['01 Theorem', '02 Field', '03 Relic'];
+}
+
+function proofHistoricLabels(proof) {
+  const detail = proof && proof.detail ? proof.detail : {};
+  const labels = detail.triangle_labels || detail.vertices || [];
+  return Array.isArray(labels) && labels.length ? labels.slice(0, 3).join(' / ') : 'A / B / C';
+}
+
+const GUIDE_PROOFS = {
+  gauss_bonnet_excess: {
+    quest_id: 'gauss_bonnet_excess',
+    kind: 'gauss_bonnet_excess',
+    title: 'Academy Field Guide: Gauss-Bonnet Angle Excess',
+    relic: 'Curvature Seal',
+    detail: {
+      kind: 'gauss_bonnet_excess',
+      mode: 'excess',
+      is_deficit: false,
+      target_relation: '>=',
+      measured_sum: 3.4034,
+      target_sum: 3.2463,
+      excess_rad: 0.2618,
+      target_excess_rad: 0.1047,
+      angle_sum_degrees: 195.0,
+      target_degrees: 186.0,
+      excess_degrees: 15.0,
+      target_excess_degrees: 6.0,
+      reference_excess_rad: 0.2094,
+      reference_excess_degrees: 12.0,
+      k_max: 0.0184,
+      genus: 1,
+      markers: ['A', 'B', 'C'],
+      relic: 'Curvature Seal',
+    },
+  },
+  bdp_circle_deficit: {
+    quest_id: 'bdp_circle_deficit',
+    kind: 'bdp_circle_deficit',
+    title: 'Academy Field Guide: BDP Circle Deficit',
+    relic: 'Metric Seal',
+    detail: {
+      kind: 'bdp_circle_deficit',
+      center: 'O',
+      vertices: ['P1', 'P2', 'P3', 'P4'],
+      triangle_labels: ['A', 'B', 'C'],
+      vertex_count: 48,
+      radius: 18.75,
+      flat_perimeter: 117.81,
+      real_perimeter: 113.25,
+      perimeter: 113.25,
+      circle_perimeter: 117.81,
+      ratio: 0.9613,
+      target_ratio: 0.9650,
+      deficit: 0.0387,
+      deficit_ratio: 0.0387,
+      k_est: 0.00875,
+      k_estimate: 0.00875,
+      k_exact: 0.00902,
+      k_analytic: 0.00902,
+      relative_error: 0.0299,
+      is_circumcircle: true,
+      relic: 'Metric Seal',
+    },
+  },
+  holonomy_loop: {
+    quest_id: 'holonomy_loop',
+    kind: 'holonomy_loop',
+    title: 'Academy Field Guide: Levi-Civita Holonomy',
+    relic: 'Connection Seal',
+    detail: {
+      kind: 'holonomy_loop',
+      start_vector: [1.0, 0.0],
+      end_vector: [0.7071, 0.7071],
+      holonomy_angle_deg: 45.0,
+      holonomy_angle_rad: Math.PI / 4,
+      target_angle_deg: 28.0,
+      target_angle_rad: 0.4887,
+      area_flux_rad: 0.7854,
+      area_flux_deg: 45.0,
+      relative_error: 0.0,
+      vertex_labels: ['A', 'B', 'C', 'D'],
+      vector_start: [1.0, 0.0],
+      vector_end: [0.7071, 0.7071],
+      transport_steps: 96,
+      closure_error: 0.002,
+      closure_tolerance: 0.1,
+      relic: 'Connection Seal',
+    },
+  },
+  parabolic_line: {
+    quest_id: 'parabolic_line',
+    kind: 'parabolic_line',
+    title: 'Academy Field Guide: Parabolic Seam',
+    relic: 'Singularity Seal',
+    detail: {
+      kind: 'parabolic_line',
+      labels: ['P1', 'P2', 'P3'],
+      curvatures: [0.0, 0.0001, -0.0002],
+      principal_curvatures: [[0.0, -0.20], [0.0, 0.12], [0.0, -0.18]],
+      asymptotic_directions: [[1.0, 0.0], [0.8, 0.6], [1.0, 0.0]],
+      asymptotic_direction: [1.0, 0.0],
+      pegs: [
+        { k: 0.0, kappa1: 0.0, kappa2: -0.20 },
+        { k: 0.0001, kappa1: 0.0, kappa2: 0.12 },
+        { k: -0.0002, kappa1: 0.0, kappa2: -0.18 },
+      ],
+      pairwise_distances: [3.0, 3.2, 3.1],
+      valid_pegs: 3,
+      target_pegs: 3,
+      tolerance: 0.004,
+      tolerance_k: 0.004,
+      min_distance: 2.0,
+      spacing_ok: true,
+      is_parabolic_verified: true,
+      relic: 'Singularity Seal',
+    },
+  },
+  homotopy_loop: {
+    quest_id: 'homotopy_loop',
+    kind: 'homotopy_loop',
+    title: 'Academy Field Guide: Homotopy Circumnavigation',
+    relic: 'Topology Seal',
+    detail: {
+      kind: 'homotopy_loop',
+      u_start: 0.0,
+      u_end: 2 * Math.PI,
+      v_start: 0.0,
+      v_end: 0.0,
+      delta_u: 2 * Math.PI,
+      delta_v: 0.0,
+      winding_u: 1.0,
+      winding_v: 0.0,
+      winding_max: 1.0,
+      genus: 1,
+      fundamental_group: 'Z + Z',
+      closure_distance: 0.02,
+      capture_radius: 3.0,
+      origin_label: 'O',
+      current_label: 'O',
+      relic: 'Topology Seal',
+    },
+  },
+};
+
+function showExampleGuide() {
+  if (state.difficulty !== 'easy') {
+    hintMessage('Field Guide preview is available in Easy mode.', 'warn');
+    return;
+  }
+  const quest = state.player && state.player.quest;
+  const kind = quest && GUIDE_PROOFS[quest.id] ? quest.id : 'gauss_bonnet_excess';
+  const proof = JSON.parse(JSON.stringify(GUIDE_PROOFS[kind]));
+  proof.title = 'Academy Field Guide: Theoretical Example Preview';
+  proof.__guide = true;
+  showProof(proof);
+  hintMessage('Field Guide opened - theoretical reference only; no seal is awarded.', 'info');
+}
+function buildGaussProofCards(proof) {
+  const detail = proof && proof.detail ? proof.detail : {};
+  const measured = proofNumber(detail.measured_sum, proofNumber(detail.angle_sum_degrees, 180) * Math.PI / 180);
+  const excess = proofNumber(detail.excess_rad, measured - Math.PI);
+  const target = proofNumber(detail.target_sum, proofNumber(detail.target_degrees, 200) * Math.PI / 180);
+  const measuredDeg = measured * 180 / Math.PI;
+  const excessDeg = excess * 180 / Math.PI;
+  const targetDeg = target * 180 / Math.PI;
+  const deficitDeg = proofNumber(detail.angle_deficit_deg, -excessDeg);
+  const isDeficit = Boolean(detail.is_deficit || detail.mode === 'deficit');
+  const curvatureValue = isDeficit ? proofNumber(detail.k_min, 0) : proofNumber(detail.k_max, 0);
+  const cards = [];
+
+  const theorem = proofCard('Governing Theorem');
+  if (isDeficit) {
+    proofMath(theorem, '\\sum_{i=1}^{3}\\theta_i-\\pi=\\iint_{\\Delta}K\\,dA<0\\implies\\sum_{i=1}^{3}\\theta_i<180^{\\circ}', { highlight: 'curvature' });
+    proofText(theorem, 'Inside a negative-curvature saddle, the curvature flux is negative, so the geodesic triangle loses angle and falls below the Euclidean 180 degree reference.');
+  } else {
+    proofMath(theorem, '\\sum_{i=1}^{3}\\theta_i-\\pi=\\iint_{\\Delta}K\\,dA', { highlight: 'curvature' });
+    proofText(theorem, 'For a geodesic triangle on a curved surface, positive angular excess measures the positive curvature flux enclosed by its boundary.');
+  }
+  cards.push(theorem);
+
+  const field = proofCard('Field Invariants');
+  proofMath(field, `\\sum_{i=1}^{3}\\theta_i=${proofFormat(measured, 6)}\\,\\mathrm{rad}=${proofFormat(measuredDeg, 2)}^{\\circ}`, { highlight: 'triangle' });
+  proofMath(field, `\\Delta\\theta=${proofFormat(excess, 6)}\\,\\mathrm{rad}=${proofFormat(excessDeg, 2)}^{\\circ}`, { highlight: isDeficit ? 'deficit' : 'excess', displayMode: false });
+  field.appendChild(proofValueGrid([
+    ['Measured sum', `${proofFormat(measuredDeg, 2)} deg`],
+    ['Adaptive target', `${proofFormat(targetDeg, 2)} deg`],
+    [isDeficit ? 'Angle deficit' : 'Angle excess', `${proofFormat(isDeficit ? deficitDeg : excessDeg, 2)} deg`],
+    [isDeficit ? 'Curvature trough' : 'Curvature peak', formatCurvature(curvatureValue, 5)],
+  ]));
+  cards.push(field);
+
+  const inversion = proofCard('Curvature Inversion & Discrepancy');
+  if (isDeficit) {
+    proofMath(inversion, 'K_{\\mathrm{mean}}=\\frac{\\Delta\\theta}{A_{\\Delta}}<0\\quad\\text{and}\\quad \\sum\\theta_i\\le\\theta_{\\mathrm{target}}', { highlight: 'curvature' });
+    proofText(inversion, `The measured angle sum is below the prechecked upper target by ${proofFormat(targetDeg - measuredDeg, 2)} degrees once the seal is earned.`);
+    inversion.appendChild(proofValueGrid([
+      ['Target relation', `<= ${proofFormat(targetDeg, 2)} deg`],
+      ['Negative flux', 'verified'],
+    ]));
+  } else {
+    proofMath(inversion, 'K_{\\mathrm{mean}}=\\frac{\\Delta\\theta}{A_{\\Delta}}>0\\quad\\text{and}\\quad \\sum\\theta_i\\ge\\theta_{\\mathrm{target}}', { highlight: 'curvature' });
+    proofText(inversion, `The measured angle sum exceeds the prechecked lower target by ${proofFormat(measuredDeg - targetDeg, 2)} degrees once the seal is earned.`);
+    inversion.appendChild(proofValueGrid([
+      ['Target relation', `>= ${proofFormat(targetDeg, 2)} deg`],
+      ['Positive flux', 'verified'],
+    ]));
+  }
+  cards.push(inversion);
+
+  const relic = proofCard('Relic Bestowal');
+  proofMath(relic, '\\mathcal{R}_{\\mathrm{Gauss\\!-\\!Bonnet}}=\\mathrm{Curvature\\ Seal}', { highlight: 'relic' });
+  proofText(relic, `${proof.relic || 'Curvature Seal'} is now part of the academy ledger. The Gauss-Bonnet survey is complete.`);
+  cards.push(relic);
+  return cards;
+}
+function buildBdpProofCards(proof) {
+  const detail = proof && proof.detail ? proof.detail : {};
+  const radius = proofNumber(detail.radius, detail.mean_radius);
+  const flat = proofNumber(detail.flat_perimeter, detail.circle_perimeter);
+  const real = proofNumber(detail.real_perimeter, detail.perimeter);
+  const ratio = proofNumber(detail.ratio, flat > 0 ? real / flat : 1);
+  const deficit = proofNumber(detail.deficit_ratio, 1 - ratio);
+  const kEst = proofNumber(detail.k_est, detail.k_estimate);
+  const kExact = proofNumber(detail.k_exact, detail.k_analytic);
+  const error = proofNumber(detail.relative_error, Math.abs(kExact) > 1e-12 ? Math.abs(kEst - kExact) / Math.abs(kExact) : 0);
+  const cards = [];
+
+  const theorem = proofCard('Governing Theorem');
+  proofMath(theorem, 'C(r)=2\\pi r-\\frac{\\pi}{3}K r^3+O(r^4)', { highlight: 'circle' });
+  proofText(theorem, 'A geodesic circle on a positively curved surface has a shorter circumference than the Euclidean circle of the same radius.');
+  cards.push(theorem);
+
+  const field = proofCard('Field Invariants');
+  proofMath(field, `R=${proofFormat(radius, 3)}\\,\\mathrm{m},\\quad C_{\\mathrm{flat}}=${proofFormat(flat, 3)}\\,\\mathrm{m},\\quad C_{\\mathrm{real}}=${proofFormat(real, 3)}\\,\\mathrm{m}`, { highlight: 'deficit' });
+  proofMath(field, `\\Delta C=1-\\frac{C_{\\mathrm{real}}}{C_{\\mathrm{flat}}}=${proofFormat(deficit * 100, 2)}\\%`, { highlight: 'deficit', displayMode: false });
+  field.appendChild(proofValueGrid([
+    ['Flat circumference', `${proofFormat(flat, 3)} m`],
+    ['Measured circumference', `${proofFormat(real, 3)} m`],
+    ['Ratio', proofFormat(ratio, 6)],
+    ['Target ratio', proofFormat(detail.target_ratio, 6)],
+  ]));
+  cards.push(field);
+
+  const inversion = proofCard('Curvature Inversion & Discrepancy');
+  proofMath(inversion, 'K_{\\mathrm{est}}=\\frac{3(C_{\\mathrm{flat}}-C_{\\mathrm{real}})}{\\pi R^3}', { highlight: 'curvature' });
+  inversion.appendChild(proofValueGrid([
+    ['Estimated K', formatCurvature(kEst, 5)],
+    ['Analytic K', formatCurvature(kExact, 5)],
+    ['Relative error', proofFormat(error * 100, 3) + '%'],
+    ['Ring vertices', String(detail.vertex_count || '-')],
+  ]));
+  proofText(inversion, 'The inversion closes the loop between the measured rope ring and the surface curvature sampled at its centre.');
+  cards.push(inversion);
+
+  const relic = proofCard('Relic Bestowal');
+  proofMath(relic, '\\mathcal{R}_{\\mathrm{BDP}}=\\mathrm{Metric\\ Seal}', { highlight: 'relic' });
+  proofText(relic, `${proof.relic || 'Metric Seal'} is now part of the academy ledger. The geodesic circle has been cinched and verified.`);
+  cards.push(relic);
+  return cards;
+}
+
+function proofVector(value, fallback = [0, 0]) {
+  return Array.isArray(value) && value.length >= 2
+    ? [proofNumber(value[0], fallback[0]), proofNumber(value[1], fallback[1])]
+    : fallback.slice();
+}
+
+function proofDirection(value, fallback = [1, 0]) {
+  const direction = proofVector(value, fallback);
+  const norm = Math.hypot(direction[0], direction[1]);
+  if (!Number.isFinite(norm) || norm <= 1e-12) return fallback.slice();
+  return [direction[0] / norm, direction[1] / norm];
+}
+
+function buildHolonomyProofCards(proof) {
+  const detail = proof && proof.detail ? proof.detail : {};
+  const start = proofVector(detail.start_vector || detail.vector_start);
+  const end = proofVector(detail.end_vector || detail.vector_end);
+  const angleRad = proofNumber(detail.holonomy_angle_rad, detail.holonomy_angle);
+  const angleDeg = proofNumber(detail.holonomy_angle_deg, detail.holonomy_degrees !== undefined ? detail.holonomy_degrees : angleRad * 180 / Math.PI);
+  const targetDeg = proofNumber(detail.target_angle_deg, detail.target_degrees);
+  const fluxRad = proofNumber(detail.area_flux_rad);
+  const fluxDeg = proofNumber(detail.area_flux_deg, fluxRad * 180 / Math.PI);
+  const error = proofNumber(detail.relative_error);
+  const cards = [];
+
+  const theorem = proofCard('Governing Theorem');
+  proofMath(theorem, '\\Delta\\alpha=\\oint_\\gamma \\Gamma^k_{ij}v^j\\,dx^i\\equiv\\iint_\\Omega K\\,dA\\pmod{2\\pi}', { highlight: 'loop' });
+  proofText(theorem, 'Parallel transport around a closed loop measures the curvature flux enclosed by the loop, up to the integer winding ambiguity of a full rotation.');
+  cards.push(theorem);
+
+  const vectors = proofCard('Start & End Tangent Vectors');
+  proofMath(vectors, `\\vec v_{\\mathrm{start}}=(${proofFormat(start[0], 5)},${proofFormat(start[1], 5)})^\\top\\;\\longrightarrow\\;\\vec v_{\\mathrm{end}}=(${proofFormat(end[0], 5)},${proofFormat(end[1], 5)})^\\top`, { highlight: 'vector' });
+  vectors.appendChild(proofValueGrid([
+    ['Start vector', `(${proofFormat(start[0], 5)}, ${proofFormat(start[1], 5)})`],
+    ['End vector', `(${proofFormat(end[0], 5)}, ${proofFormat(end[1], 5)})`],
+    ['Transport steps', String(detail.transport_steps || '-')],
+    ['Closure error', `${proofFormat(detail.closure_error, 4)} m`],
+  ]));
+  cards.push(vectors);
+
+  const flux = proofCard('Holonomy & Curvature Flux');
+  proofMath(flux, `\\Delta\\alpha=${proofFormat(angleDeg, 2)}^\\circ,\\quad \\iint_\\Omega K\\,dA=${proofFormat(fluxDeg, 2)}^\\circ\\quad(\\varepsilon=${proofFormat(error * 100, 3)}\\%)`, { highlight: 'flux' });
+  flux.appendChild(proofValueGrid([
+    ['Measured holonomy', `${proofFormat(angleDeg, 2)} deg`],
+    ['Reference flux', `${proofFormat(fluxDeg, 2)} deg`],
+    ['Target threshold', `${proofFormat(targetDeg, 2)} deg`],
+    ['Relative error', `${proofFormat(error * 100, 3)}%`],
+  ]));
+  cards.push(flux);
+
+  const relic = proofCard('Relic Bestowal');
+  proofMath(relic, '\\mathcal{R}_{\\mathrm{Connection}}=\\mathrm{Connection\\ Seal}', { highlight: 'relic' });
+  proofText(relic, `${proof.relic || 'Connection Seal'} confirms that the transported vector remembers the curvature flux of the closed loop.`);
+  cards.push(relic);
+  return cards;
+}
+
+function buildParabolicProofCards(proof) {
+  const detail = proof && proof.detail ? proof.detail : {};
+  const labels = detail.labels || ['P1', 'P2', 'P3'];
+  const curvatures = detail.curvatures || [];
+  const principal = detail.principal_curvatures || [];
+  const pegs = Array.isArray(detail.pegs) && detail.pegs.length
+    ? detail.pegs
+    : labels.map((_label, index) => ({
+        k: proofNumber(curvatures[index], 0),
+        kappa1: proofNumber(principal[index] && principal[index][0], 0),
+        kappa2: proofNumber(principal[index] && principal[index][1], 0),
+      }));
+  const direction = proofDirection(detail.asymptotic_direction || [1, 0]);
+  const tolerance = proofNumber(detail.tolerance_k, detail.tolerance);
+  const verified = Boolean(detail.is_parabolic_verified);
+  const cards = [];
+
+  const theorem = proofCard('Principal Curvature Identity');
+  proofMath(theorem, 'K=\\kappa_1\\kappa_2=\\frac{LN-M^2}{EG-F^2}=0\\iff \\kappa_1=0,\\ \\kappa_2\\ne0', { highlight: 'seam' });
+  proofText(theorem, 'A parabolic seam is the zero-curvature boundary where one principal curvature vanishes while the other remains nonzero.');
+  cards.push(theorem);
+
+  const field = proofCard('Parabolic Peg Measurements');
+  pegs.slice(0, 3).forEach((peg, index) => {
+    proofMath(field, `P_{${index + 1}}: K\\approx ${formatCurvature(peg.k, 5)},\\quad \\kappa_1\\approx ${proofFormat(peg.kappa1, 5) + ' m\u207b\u00b9'},\\quad \\kappa_2\\approx ${proofFormat(peg.kappa2, 5) + ' m\u207b\u00b9'}\\ \\mathrm{m}^{-1}`, { highlight: 'pegs', displayMode: false });
   });
+  field.appendChild(proofValueGrid([
+    ['Valid pegs', `${detail.valid_pegs !== undefined ? detail.valid_pegs : pegs.length} / 3`],
+    ['Tolerance |K|', formatCurvature(tolerance, 5)],
+    ['Spacing verified', detail.spacing_ok ? 'yes' : 'no'],
+    ['Seam verified', verified ? 'yes' : 'no'],
+  ]));
+  cards.push(field);
 
+  const asymptotic = proofCard('Asymptotic Direction');
+  proofMath(asymptotic, `II(\\vec v_{\\mathrm{asymp}},\\vec v_{\\mathrm{asymp}})\\approx0,\\quad \\vec v_{\\mathrm{asymp}}=(${proofFormat(direction[0], 5)},${proofFormat(direction[1], 5)})`, { highlight: 'asymptotic' });
+  proofText(asymptotic, 'The highlighted direction is the null eigenvector of the second fundamental form at the parabolic seam.');
+  cards.push(asymptotic);
+
+  const relic = proofCard('Relic Bestowal');
+  proofMath(relic, '\\mathcal{R}_{\\mathrm{Singularity}}=\\mathrm{Singularity\\ Seal}', { highlight: 'relic' });
+  proofText(relic, `${proof.relic || 'Singularity Seal'} is awarded for tracing the zero-curvature seam and verifying its asymptotic tangent.`);
+  cards.push(relic);
+  return cards;
+}
+
+function buildHomotopyProofCards(proof) {
+  const detail = proof && proof.detail ? proof.detail : {};
+  const uStart = proofNumber(detail.u_start, 0);
+  const uEnd = proofNumber(detail.u_end, proofNumber(detail.delta_u));
+  const deltaU = proofNumber(detail.delta_u, uEnd - uStart);
+  const windingU = proofNumber(detail.winding_u, deltaU / (2 * Math.PI));
+  const windingV = proofNumber(detail.winding_v);
+  const deltaV = proofNumber(detail.delta_v, windingV * 2 * Math.PI);
+  const genus = detail.genus !== undefined && detail.genus !== null ? detail.genus : '-';
+  const group = detail.fundamental_group || 'Z + Z';
+  const cards = [];
+
+  const theorem = proofCard('Discrete Winding Number');
+  proofMath(theorem, 'n_u=\\frac{1}{2\\pi}\\oint_\\gamma du\\in\\mathbb Z,\\quad [\\gamma]\\in\\pi_1(\\mathbb T^2)\\cong\\mathbb Z\\oplus\\mathbb Z', { highlight: 'torus' });
+  proofText(theorem, 'The unwrapped coordinate change records the homotopy class of the closed path on the torus.');
+  cards.push(theorem);
+
+  const cover = proofCard('Universal Cover Phase');
+  proofMath(cover, `\\Delta u=u_{\\mathrm{end}}-u_{\\mathrm{start}}=${proofFormat(deltaU, 3)}\\approx${proofFormat(deltaU / Math.PI, 3)}\\pi\\implies n_u=${proofFormat(windingU, 3)},\\ n_v=${proofFormat(windingV, 3)}`, { highlight: 'winding' });
+  cover.appendChild(proofValueGrid([
+    ['u start', proofFormat(uStart, 3)],
+    ['u end', proofFormat(uEnd, 3)],
+    ['Delta v', proofFormat(deltaV, 3)],
+    ['Capture radius', `${proofFormat(detail.capture_radius, 3)} m`],
+  ]));
+  cards.push(cover);
+
+  const obstruction = proofCard('Topological Obstruction');
+  proofMath(obstruction, `[\\gamma]=(${proofFormat(windingU, 2)},${proofFormat(windingV, 2)})\\ne(0,0)\\implies \\gamma\\not\\sim\\mathrm{point}\\quad(\\mathrm{Genus}\\ g=${genus})`, { highlight: 'hole' });
+  proofText(obstruction, `The fundamental group is ${group}; the central hole prevents the lasso from contracting to a point.`);
+  cards.push(obstruction);
+
+  const relic = proofCard('Relic Bestowal');
+  proofMath(relic, '\\mathcal{R}_{\\mathrm{Topology}}=\\mathrm{Topology\\ Seal}', { highlight: 'relic' });
+  proofText(relic, `${proof.relic || 'Topology Seal'} marks a non-contractible circumnavigation of the closed surface.`);
+  cards.push(relic);
+  return cards;
+}
+function buildGenericProofCards(proof) {
+  const cards = [];
+  const theorem = proofCard('Governing Theorem');
+  proofText(theorem, proof.theorem || 'The field measurement is checked against the local geometric invariant.');
+  cards.push(theorem);
+  const steps = proof.steps || [];
+  steps.forEach((step, index) => {
+    const card = proofCard(`Field Step ${index + 1}`);
+    proofText(card, String(step));
+    cards.push(card);
+  });
+  const relic = proofCard('Relic Bestowal');
+  proofMath(relic, `\\mathcal{R}=\\text{${String(proof.relic || 'Geometric Seal').replace(/\s+/g, '\\ ')}}`, { highlight: 'relic' });
+  cards.push(relic);
+  return cards;
+}
+
+function buildProofCards(proof) {
+  if (proof && proof.kind === 'gauss_bonnet_excess') return buildGaussProofCards(proof);
+  if (proof && proof.kind === 'bdp_circle_deficit') return buildBdpProofCards(proof);
+  if (proof && proof.kind === 'holonomy_loop') return buildHolonomyProofCards(proof);
+  if (proof && proof.kind === 'parabolic_line') return buildParabolicProofCards(proof);
+  if (proof && proof.kind === 'homotopy_loop') return buildHomotopyProofCards(proof);
+  return buildGenericProofCards(proof || {});
+}
+
+function drawAngleLedger(ctx, cx, cy, width, measured, phase, highlight) {
+  const total = Math.PI + (measured - Math.PI) * phase;
+  const radius = Math.min(width * 0.5, 118);
+  const segment = total / 3;
+  const start = Math.PI;
+  const colors = ['rgba(77, 171, 247, 0.42)', 'rgba(81, 207, 102, 0.38)', 'rgba(255, 214, 102, 0.44)'];
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.lineWidth = 1.2;
+  for (let index = 0; index < 3; index += 1) {
+    const from = start + segment * index;
+    const to = start + segment * (index + 1);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, radius, from, to);
+    ctx.closePath();
+    ctx.fillStyle = colors[index];
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(232, 242, 228, 0.38)';
+    ctx.stroke();
+  }
+  const gap = Math.max(0, Math.PI - total);
+  if (gap > 1e-6) {
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, radius, Math.PI + total, Math.PI * 2);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(150, 126, 204, ' + (0.24 + 0.22 * (highlight === 'deficit' || highlight === 'curvature' ? 1 : 0)) + ')';
+
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(190, 156, 235, 0.9)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  const excess = Math.max(0, total - Math.PI);
+  if (excess > 1e-6) {
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, radius, Math.PI * 2, Math.PI * 2 + excess);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(255, 214, 102, ${0.38 + 0.22 * (highlight === 'excess' || highlight === 'curvature' ? 1 : 0)})`;
+    ctx.fill();
+    ctx.strokeStyle = '#ffd166';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(232, 242, 228, 0.55)';
   ctx.beginPath();
-  for (let k = 0; k < 3; k += 1) {
-    const a = vertices[k];
-    const b = vertices[(k + 1) % 3];
+  ctx.moveTo(-radius, 0);
+  ctx.lineTo(radius, 0);
+  ctx.stroke();
+  ctx.fillStyle = '#f3e5ab';
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(`Sigma theta = ${(total * 180 / Math.PI).toFixed(1)} deg`, 0, -radius - 12);
+  ctx.restore();
+}
+
+function sampleQuadratic(a, control, b, steps = 16) {
+  const points = [];
+  for (let index = 0; index <= steps; index += 1) {
+    const t = index / steps;
+    const one = 1 - t;
+    points.push([
+      one * one * a[0] + 2 * one * t * control[0] + t * t * b[0],
+      one * one * a[1] + 2 * one * t * control[1] + t * t * b[1],
+    ]);
+  }
+  return points;
+}
+
+function proofTriangleEdges(vertices, cx, cy, bulge) {
+  return vertices.map((a, index) => {
+    const b = vertices[(index + 1) % vertices.length];
     const mx = (a[0] + b[0]) / 2;
     const my = (a[1] + b[1]) / 2;
     const ox = mx - cx;
     const oy = my - cy;
     const norm = Math.hypot(ox, oy) || 1;
-    const bulge = 16;
-    const px = mx + (ox / norm) * bulge;
-    const py = my + (oy / norm) * bulge;
-    if (k === 0) ctx.moveTo(a[0], a[1]);
-    ctx.quadraticCurveTo(px, py, b[0], b[1]);
-  }
-  ctx.closePath();
-  ctx.fillStyle = 'rgba(77, 171, 247, 0.12)';
-  ctx.fill();
-  ctx.strokeStyle = `rgba(255, 214, 102, ${0.7 + 0.25 * Math.sin(time * 3)})`;
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
-
-  for (let k = 0; k < 3; k += 1) {
-    const v = vertices[k];
-    ctx.strokeStyle = 'rgba(120, 210, 255, 0.85)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(v[0], v[1], 16, time * 1.5 + k * 2, time * 1.5 + k * 2 + 1.6);
-    ctx.stroke();
-    ctx.fillStyle = '#ffd166';
-    ctx.beginPath();
-    ctx.arc(v[0], v[1], 4, 0, TWO_PI);
-    ctx.fill();
-  }
-
-  ctx.fillStyle = 'rgba(232, 242, 228, 0.8)';
-  ctx.font = '13px monospace';
-  const proof = state.proof || {};
-  if (typeof proof.angle_sum_degrees === 'number') {
-    ctx.fillText(`measured ${proof.angle_sum_degrees.toFixed(1)} deg`, 16, 24);
-  }
-  if (typeof proof.target_degrees === 'number') {
-    ctx.fillText(`target ${proof.target_degrees.toFixed(1)} deg`, 16, 42);
-  }
+    const control = [mx + ox / norm * bulge, my + oy / norm * bulge];
+    return sampleQuadratic(a, control, b, 18);
+  });
 }
 
-
-function drawBdpProofFrame(ctx, W, H, time, proof) {
-  const detail = proof.detail || {};
-  const deficit = Math.max(0.0, Math.min(0.6, Number(detail.deficit) || 0.05));
-  const cx = W / 2;
-  const cy = H / 2 + 4;
-  const flatRadius = Math.min(W, H) * 0.34;
-  const pulse = 1 + 0.05 * Math.sin(time * 2.0);
-  const geodesicRadius = flatRadius * (1.0 - deficit) * pulse;
-
-  // Three pegs start as a triangle and visually expand toward the ring.
-  const expansion = 0.62 + 0.20 * (0.5 + 0.5 * Math.sin(time * 1.8));
-  const triangleRadius = geodesicRadius * expansion;
-  const triangle = [0, 1, 2].map((index) => {
-    const angle = -Math.PI / 2 + index * TWO_PI / 3;
-    return [cx + triangleRadius * Math.cos(angle), cy + triangleRadius * Math.sin(angle)];
-  });
-  ctx.save();
-  ctx.setLineDash([5, 5]);
-  ctx.strokeStyle = 'rgba(120, 235, 255, 0.9)';
-  ctx.lineWidth = 1.7;
+function traceProofPolyline(ctx, points, close = false) {
+  if (!points.length) return;
   ctx.beginPath();
-  ctx.moveTo(triangle[0][0], triangle[0][1]);
-  ctx.lineTo(triangle[1][0], triangle[1][1]);
-  ctx.lineTo(triangle[2][0], triangle[2][1]);
-  ctx.closePath();
+  ctx.moveTo(points[0][0], points[0][1]);
+  for (let index = 1; index < points.length; index += 1) ctx.lineTo(points[index][0], points[index][1]);
+  if (close) ctx.closePath();
+}
+
+function drawGaussProofStage(ctx, W, H, clock, timeline, proof, highlight) {
+  const detail = proof && proof.detail ? proof.detail : {};
+  const measured = proofNumber(detail.measured_sum, proofNumber(detail.angle_sum_degrees, 180) * Math.PI / 180);
+  const excess = proofNumber(detail.excess_rad, measured - Math.PI);
+  const isDeficit = Boolean(detail.is_deficit || detail.mode === 'deficit');
+  const p1 = easeInOutCubic(proofPhase(timeline, 0, 0.34));
+  const p2 = easeInOutCubic(proofPhase(timeline, 0.28, 0.68));
+  const p3 = easeInOutCubic(proofPhase(timeline, 0.62, 1));
+  const cx = W / 2;
+  const cy = H * 0.44;
+  const radius = Math.min(W * 0.32, H * 0.34);
+  const vertices = [0, 1, 2].map((index) => {
+    const angle = -Math.PI / 2 + index * TWO_PI / 3;
+    return [cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)];
+  });
+  const straight = vertices.map((point) => point.slice());
+  const bulge = isDeficit ? -(8 + 30 * p2 + 8 * p3) : (8 + 34 * p2 + 10 * p3);
+  const edges = proofTriangleEdges(vertices, cx, cy, bulge);
+  const pulse = 0.5 + 0.5 * Math.sin(clock * 2.6);
+  const curvatureHot = ['curvature', 'excess', 'triangle', 'deficit'].includes(highlight);
+  const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 1.35);
+  glow.addColorStop(0, isDeficit ? `rgba(150, 126, 204, ${0.06 + 0.18 * p3})` : `rgba(255, 214, 102, ${0.05 + (0.16 + (curvatureHot ? 0.12 : 0)) * p3})`);
+  glow.addColorStop(0.62, isDeficit ? 'rgba(205, 180, 230, 0.08)' : `rgba(77, 171, 247, ${0.035 + 0.06 * p2})`);
+  glow.addColorStop(1, 'rgba(7, 11, 17, 0)');
+  ctx.save();
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  const flat = edges.flat();
+  traceProofPolyline(ctx, flat, true);
+  ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.setLineDash([6, 6]);
+  ctx.strokeStyle = `rgba(205, 212, 224, ${0.35 + 0.45 * (1 - p2)})`;
+  ctx.lineWidth = 1.4;
+  traceProofPolyline(ctx, straight, true);
   ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
   ctx.setLineDash([]);
-  for (let index = 0; index < 3; index += 1) {
-    ctx.fillStyle = '#78ebff';
-    ctx.beginPath();
-    ctx.arc(triangle[index][0], triangle[index][1], 4, 0, TWO_PI);
-    ctx.fill();
+  ctx.lineWidth = 2.6;
+  ctx.strokeStyle = isDeficit ? `rgba(190, 156, 235, ${0.72 + 0.18 * pulse})` : `rgba(255, 214, 102, ${0.82 + 0.16 * pulse})`;
+  ctx.shadowColor = isDeficit ? 'rgba(170, 135, 220, 0.75)' : (curvatureHot ? '#ffd166' : 'rgba(77, 171, 247, 0.55)');
+  ctx.shadowBlur = 12 + (curvatureHot ? 16 : 0);
+  for (const edge of edges) {
+    traceProofPolyline(ctx, edge, false);
+    ctx.stroke();
   }
   ctx.restore();
 
-  // Deficit shadow: the area that curvature removes from the flat circle.
-  ctx.fillStyle = `rgba(255, 214, 102, ${0.07 + 0.06 * Math.sin(time * 2.4)})`;
-  ctx.beginPath();
-  ctx.arc(cx, cy, flatRadius, 0, TWO_PI);
-  ctx.arc(cx, cy, geodesicRadius, 0, TWO_PI, true);
-  ctx.fill();
+  for (let index = 0; index < vertices.length; index += 1) {
+    const vertex = vertices[index];
+    const next = vertices[(index + 1) % 3];
+    const previous = vertices[(index + 2) % 3];
+    const a1 = Math.atan2(previous[1] - vertex[1], previous[0] - vertex[0]);
+    const a2 = Math.atan2(next[1] - vertex[1], next[0] - vertex[0]);
+    const arcRadius = 20 + 5 * p2;
+    ctx.save();
+    ctx.strokeStyle = isDeficit ? 'rgba(190, 156, 235, 0.9)' : (curvatureHot && p3 > 0.1 ? '#ffd166' : 'rgba(120, 210, 255, 0.72)');
+    ctx.fillStyle = isDeficit ? `rgba(150, 126, 204, ${0.07 + 0.18 * p3})` : `rgba(255, 214, 102, ${0.06 + 0.18 * p3})`;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(vertex[0], vertex[1]);
+    ctx.arc(vertex[0], vertex[1], arcRadius, a1, a2, false);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = isDeficit ? '#c7a8ff' : '#ffd166';
+    ctx.beginPath();
+    ctx.arc(vertex[0], vertex[1], 4, 0, TWO_PI);
+    ctx.fill();
+  }
 
-  // Flat Euclidean reference circle (grey dashed).
-  ctx.setLineDash([7, 6]);
-  ctx.strokeStyle = 'rgba(205, 212, 224, 0.8)';
-  ctx.lineWidth = 1.6;
+  drawAngleLedger(ctx, cx, H - 48, Math.min(W * 0.72, 360), measured, p3, highlight);
+
+  ctx.fillStyle = 'rgba(232, 242, 228, 0.82)';
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'left';
+  const signedAngle = isDeficit ? -proofNumber(detail.angle_deficit_deg, -excess * 180 / Math.PI) : excess * 180 / Math.PI;
+  ctx.fillText(isDeficit ? `measured deficit = ${Math.abs(signedAngle).toFixed(2)} deg` : `measured excess = ${signedAngle.toFixed(2)} deg`, 16, 24);
+  ctx.fillText(`phase = ${(p2 > 0 ? p2 > 0.95 ? 'curvature flux' : 'geodesic bend' : 'Euclidean reference')}`, 16, 42);
+  if (p3 > 0.02) {
+    ctx.fillStyle = isDeficit ? 'rgba(150, 126, 204, ' + (0.18 + 0.18 * pulse) + ')' : 'rgba(255, 214, 102, ' + (0.18 + 0.18 * pulse) + ')';
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 1.12, 0, TWO_PI);
+    ctx.fill();
+  }
+}
+
+function drawBdpProofStage(ctx, W, H, clock, timeline, proof, highlight) {
+  const detail = proof && proof.detail ? proof.detail : {};
+  const ratio = clamp(proofNumber(detail.ratio, 1 - proofNumber(detail.deficit_ratio, 0.05)), 0.1, 1.2);
+  const deficit = clamp(proofNumber(detail.deficit_ratio, 1 - ratio), 0, 0.8);
+  const p1 = easeInOutCubic(proofPhase(timeline, 0, 0.32));
+  const p2 = easeInOutCubic(proofPhase(timeline, 0.28, 0.72));
+  const p3 = easeInOutCubic(proofPhase(timeline, 0.66, 1));
+  const cx = W / 2;
+  const cy = H * 0.44;
+  const flatRadius = Math.min(W * 0.31, H * 0.34);
+  const targetRadius = flatRadius * clamp(ratio, 0.35, 1);
+  const startRadius = flatRadius * 0.68;
+  const overshoot = Math.sin(Math.PI * p2) * flatRadius * 0.08;
+  const ropeRadius = proofLerp(startRadius, targetRadius, p2) + overshoot;
+  const pulse = 0.5 + 0.5 * Math.sin(clock * 2.8);
+  const deficitHot = highlight === 'deficit';
+  const circleHot = highlight === 'circle';
+
+  ctx.save();
+  ctx.setLineDash([8, 6]);
+  ctx.strokeStyle = `rgba(205, 212, 224, ${0.42 + 0.42 * p1})`;
+  ctx.lineWidth = circleHot ? 2.3 : 1.5;
   ctx.beginPath();
   ctx.arc(cx, cy, flatRadius, 0, TWO_PI);
   ctx.stroke();
-  ctx.setLineDash([]);
+  ctx.restore();
 
-  // Golden geodesic ring (the rope ring shrinks inside the flat circle).
-  ctx.strokeStyle = `rgba(255, 214, 102, ${0.7 + 0.25 * Math.sin(time * 3)})`;
-  ctx.lineWidth = 2.5;
+  const triangle = [0, 1, 2].map((index) => {
+    const angle = -Math.PI / 2 + index * TWO_PI / 3;
+    return [cx + flatRadius * 0.62 * Math.cos(angle), cy + flatRadius * 0.62 * Math.sin(angle)];
+  });
+  ctx.save();
+  ctx.setLineDash([5, 5]);
+  ctx.strokeStyle = 'rgba(120, 235, 255, 0.82)';
+  ctx.lineWidth = 1.5;
+  traceProofPolyline(ctx, triangle, true);
+  ctx.stroke();
+  ctx.restore();
+  for (const point of triangle) {
+    ctx.fillStyle = '#78ebff';
+    ctx.beginPath();
+    ctx.arc(point[0], point[1], 4, 0, TWO_PI);
+    ctx.fill();
+  }
+
+  if (p3 > 0.001) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, flatRadius, 0, TWO_PI);
+    ctx.arc(cx, cy, targetRadius, 0, TWO_PI, true);
+    ctx.fillStyle = `rgba(120, 210, 255, ${0.06 + 0.15 * p3 + (deficitHot ? 0.10 : 0)})`;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  ctx.save();
+  ctx.strokeStyle = `rgba(255, 214, 102, ${0.72 + 0.24 * pulse})`;
+  ctx.shadowColor = 'rgba(255, 214, 102, 0.65)';
+  ctx.shadowBlur = 10 + (highlight === 'rope' ? 15 : 0);
+  ctx.lineWidth = 2.8;
   ctx.beginPath();
-  const sides = 48;
-  for (let k = 0; k <= sides; k += 1) {
-    const angle = (2 * Math.PI * k) / sides;
-    const x = cx + geodesicRadius * Math.cos(angle);
-    const y = cy + geodesicRadius * Math.sin(angle);
-    if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  const sides = 72;
+  for (let index = 0; index <= sides; index += 1) {
+    const angle = TWO_PI * index / sides;
+    const ripple = 1 + Math.sin(angle * 5 + clock * 3.2) * 0.012 * p2;
+    const x = cx + ropeRadius * ripple * Math.cos(angle);
+    const y = cy + ropeRadius * ripple * Math.sin(angle);
+    if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   ctx.closePath();
   ctx.stroke();
+  ctx.restore();
 
-  // Radius spoke + center anchor.
   ctx.setLineDash([4, 4]);
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.48)';
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(cx, cy);
-  ctx.lineTo(cx + geodesicRadius, cy);
+  ctx.lineTo(cx + ropeRadius, cy);
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.fillStyle = '#e0e7ff';
-  ctx.beginPath(); ctx.arc(cx, cy, 6, 0, TWO_PI); ctx.fill();
-  ctx.strokeStyle = `rgba(120, 210, 255, ${0.6 + 0.3 * Math.sin(time * 2)})`;
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(cx, cy, 10 + 3 * Math.sin(time * 2), 0, TWO_PI); ctx.stroke();
-
-  ctx.fillStyle = 'rgba(232, 242, 228, 0.85)';
-  ctx.font = '13px monospace';
-  if (typeof detail.perimeter === 'number') {
-    ctx.fillText(`geodesic C = ${detail.perimeter.toFixed(2)} m`, 16, 24);
-  }
-  if (typeof detail.circle_perimeter === 'number') {
-    ctx.fillText(`flat 2*pi*r = ${detail.circle_perimeter.toFixed(2)} m`, 16, 42);
-  }
-  if (typeof detail.ratio === 'number' && typeof detail.target_ratio === 'number') {
-    ctx.fillText(`ratio ${detail.ratio.toFixed(4)} / target ${detail.target_ratio.toFixed(4)}`, 16, 60);
-  }
-  if (Array.isArray(detail.triangle_labels) && detail.triangle_labels.length === 3) {
-    ctx.fillText(`pegs ${detail.triangle_labels.join(' / ')}`, 16, 78);
-  }
+  ctx.beginPath();
+  ctx.arc(cx, cy, 5, 0, TWO_PI);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(232, 242, 228, 0.84)';
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`C_flat = ${proofFormat(detail.flat_perimeter, 2)} m`, 16, 24);
+  ctx.fillText(`C_real = ${proofFormat(detail.real_perimeter, 2)} m`, 16, 42);
+  ctx.fillText(`deficit = ${(deficit * 100).toFixed(2)}%`, 16, 60);
+  ctx.fillStyle = deficitHot ? '#ffd166' : '#78ebff';
+  ctx.textAlign = 'center';
+  ctx.fillText(`phase = ${p3 > 0.5 ? 'deficit band' : p2 > 0.1 ? 'rope cinch' : 'Euclidean reference'}`, cx, H - 28);
 }
 
-function drawHolonomyProofFrame(ctx, W, H, time, proof) {
-  const detail = proof.detail || {};
-  const cx = W / 2;
-  const cy = H / 2 + 8;
-  const radius = Math.min(W, H) * 0.28;
-  const count = 10;
-  const points = [];
-  for (let k = 0; k < count; k += 1) {
-    const angle = -Math.PI / 2 + 2 * Math.PI * k / count;
-    points.push([cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)]);
+function proofPointLerp(a, b, t) {
+  return [proofLerp(a[0], b[0], t), proofLerp(a[1], b[1], t)];
+}
+
+function proofPolylineLength(points) {
+  let total = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    total += Math.hypot(points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1]);
   }
-  ctx.fillStyle = 'rgba(77, 171, 247, 0.10)';
+  return total;
+}
+
+function proofPointAlong(points, t) {
+  if (!points.length) return [0, 0];
+  if (points.length === 1) return points[0].slice();
+  const total = proofPolylineLength(points) || 1;
+  const target = clamp(t, 0, 1) * total;
+  let travelled = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    const a = points[index - 1];
+    const b = points[index];
+    const segment = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (travelled + segment >= target) {
+      return proofPointLerp(a, b, segment > 1e-9 ? (target - travelled) / segment : 0);
+    }
+    travelled += segment;
+  }
+  return points[points.length - 1].slice();
+}
+
+function drawProofArrow(ctx, origin, vector, length, color, dashed = false, width = 2.2) {
+  const direction = proofDirection(vector);
+  const end = [origin[0] + direction[0] * length, origin[1] + direction[1] * length];
+  const head = 8;
+  const angle = Math.atan2(direction[1], direction[0]);
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = width;
+  ctx.setLineDash(dashed ? [6, 5] : []);
   ctx.beginPath();
-  points.forEach((point, index) => {
-    if (index === 0) ctx.moveTo(point[0], point[1]);
-    else ctx.lineTo(point[0], point[1]);
-  });
+  ctx.moveTo(origin[0], origin[1]);
+  ctx.lineTo(end[0], end[1]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(end[0], end[1]);
+  ctx.lineTo(end[0] - head * Math.cos(angle - 0.42), end[1] - head * Math.sin(angle - 0.42));
+  ctx.lineTo(end[0] - head * Math.cos(angle + 0.42), end[1] - head * Math.sin(angle + 0.42));
   ctx.closePath();
   ctx.fill();
-  ctx.strokeStyle = `rgba(255, 214, 102, ${0.72 + 0.22 * Math.sin(time * 3)})`;
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
-  const angle = Number(detail.holonomy_angle) || 0;
-  const start = points[0];
-  const endAngle = -Math.PI / 2 + angle;
-  const end = [cx + radius * 0.72 * Math.cos(endAngle), cy + radius * 0.72 * Math.sin(endAngle)];
-  ctx.strokeStyle = '#78d6ff';
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(start[0], start[1]); ctx.stroke();
-  ctx.strokeStyle = '#ffd166';
-  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(end[0], end[1]); ctx.stroke();
-  ctx.fillStyle = '#e0e7ff';
-  ctx.beginPath(); ctx.arc(cx, cy, 5, 0, TWO_PI); ctx.fill();
-  ctx.fillStyle = 'rgba(232, 242, 228, 0.85)';
-  ctx.font = '13px monospace';
-  if (typeof detail.holonomy_degrees === 'number') {
-    ctx.fillText(`transport rotation = ${detail.holonomy_degrees.toFixed(2)} deg`, 16, 24);
-  }
-  if (typeof detail.target_degrees === 'number') {
-    ctx.fillText(`target >= ${detail.target_degrees.toFixed(2)} deg`, 16, 42);
-  }
-  ctx.fillText('v_start', start[0] + 8, start[1] - 8);
-  ctx.fillText('v_end', end[0] + 8, end[1] - 8);
+  ctx.restore();
+  return end;
 }
 
-function drawParabolicProofFrame(ctx, W, H, time, proof) {
-  const detail = proof.detail || {};
-  const cx = W / 2;
-  const cy = H / 2 + 18;
-  const sx = 3.4;
-  const sy = 2.3;
+function drawHolonomyProofStage(ctx, W, H, clock, timeline, proof, highlight) {
+  const detail = proof && proof.detail ? proof.detail : {};
+  const p1 = easeInOutCubic(proofPhase(timeline, 0, 0.33));
+  const p2 = easeInOutCubic(proofPhase(timeline, 0.30, 0.72));
+  const p3 = easeInOutCubic(proofPhase(timeline, 0.68, 1));
+  const loopHot = ['loop', 'flux'].includes(highlight);
+  const vectorHot = highlight === 'vector';
+  const cx = W * 0.5;
+  const cy = H * 0.49;
+  const radius = Math.min(W, H) * 0.25;
+  const points = [];
+  for (let index = 0; index < 12; index += 1) {
+    const angle = -Math.PI / 2 + TWO_PI * index / 12;
+    const wobble = 1 + 0.055 * Math.sin(index * 2.1) + 0.02 * Math.cos(index * 0.7);
+    points.push([
+      cx + radius * wobble * Math.cos(angle),
+      cy + radius * 0.74 * wobble * Math.sin(angle),
+    ]);
+  }
+  points.push(points[0].slice());
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(120, 210, 255, 0.16)';
   ctx.lineWidth = 1;
-  for (let i = -5; i <= 5; i += 1) {
-    ctx.strokeStyle = 'rgba(120, 160, 200, 0.22)';
+  for (let row = -5; row <= 5; row += 1) {
     ctx.beginPath();
-    for (let j = -5; j <= 5; j += 0.25) {
-      const x = cx + i * 18 + j * 2.2;
-      const y = cy + j * 9 - (i * i - j * j) * 0.13;
-      if (j === -5) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-    ctx.beginPath();
-    for (let j = -5; j <= 5; j += 0.25) {
-      const x = cx + j * 18 + i * 2.2;
-      const y = cy + i * 9 - (j * j - i * i) * 0.13;
-      if (j === -5) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    for (let column = -5; column <= 5; column += 0.25) {
+      const x = cx + column * 20 + row * 2.2;
+      const y = cy + row * 10 + Math.sin(column * 0.8 + row * 0.4) * 4;
+      if (column === -5) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.stroke();
   }
-  ctx.strokeStyle = `rgba(77, 235, 235, ${0.7 + 0.25 * Math.sin(time * 2.6)})`;
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  for (let j = -5; j <= 5; j += 0.08) {
-    const x = cx + j * 24;
-    const y = cy + j * 11 - (0.35 * j * j - 0.35 * j * j) * 0.0;
-    if (j === -5) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  }
+  ctx.restore();
+
+  ctx.save();
+  traceProofPolyline(ctx, points, true);
+  ctx.fillStyle = `rgba(77, 171, 247, ${0.055 + 0.06 * p1 + (loopHot ? 0.06 : 0)})`;
+  ctx.fill();
+  ctx.strokeStyle = `rgba(255, 214, 102, ${0.52 + 0.34 * p1 + (loopHot ? 0.14 : 0)})`;
+  ctx.lineWidth = loopHot ? 3.5 : 2.4;
+  ctx.shadowColor = loopHot ? '#ffd166' : 'rgba(120, 210, 255, 0.45)';
+  ctx.shadowBlur = loopHot ? 22 : 9;
   ctx.stroke();
-  const labels = detail.labels || ['P1', 'P2', 'P3'];
-  labels.slice(0, 3).forEach((label, index) => {
-    const x = cx - 150 + index * 150;
-    const y = cy + Math.sin(index * 1.4 + time) * 20;
-    ctx.fillStyle = 'rgba(77, 235, 235, 0.95)';
-    ctx.beginPath(); ctx.arc(x, y, 5, 0, TWO_PI); ctx.fill();
+  ctx.restore();
+
+  const start = points[0];
+  const startVector = proofDirection(detail.start_vector || detail.vector_start);
+  const endVector = proofDirection(detail.end_vector || detail.vector_end, startVector);
+  const angleRad = proofNumber(detail.holonomy_angle_rad, Math.atan2(endVector[1], endVector[0]) - Math.atan2(startVector[1], startVector[0]));
+  const baseAngle = Math.atan2(startVector[1], startVector[0]);
+  const initialEnd = drawProofArrow(ctx, start, startVector, 72, vectorHot ? '#ffd166' : 'rgba(120, 210, 255, 0.92)', false, 2.4);
+  ctx.fillStyle = '#78d6ff';
+  ctx.beginPath();
+  ctx.arc(start[0], start[1], 5, 0, TWO_PI);
+  ctx.fill();
+
+  if (p2 > 0.001) {
+    const travel = easeInOutCubic(p2);
+    const moving = proofPointAlong(points, travel);
+    const liveAngle = baseAngle + angleRad * travel;
+    const liveVector = [Math.cos(liveAngle), Math.sin(liveAngle)];
+    drawProofArrow(ctx, moving, liveVector, 44, 'rgba(255, 214, 102, 0.95)', false, 2.2);
+    ctx.fillStyle = '#ffd166';
+    ctx.beginPath();
+    ctx.arc(moving[0], moving[1], 5 + 2 * Math.sin(clock * 4), 0, TWO_PI);
+    ctx.fill();
+    ctx.strokeStyle = `rgba(255, 214, 102, ${0.35 + 0.35 * p2})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    for (let index = 0; index <= 30; index += 1) {
+      const point = proofPointAlong(points, travel * index / 30);
+      if (index === 0) ctx.moveTo(point[0], point[1]); else ctx.lineTo(point[0], point[1]);
+    }
+    ctx.stroke();
+  }
+
+  if (p3 > 0.001) {
+    const end = drawProofArrow(ctx, start, endVector, 72, vectorHot ? '#ffd166' : 'rgba(120, 210, 255, 0.95)', false, 2.5);
+    ctx.save();
+    ctx.fillStyle = `rgba(77, 220, 255, ${0.10 + 0.14 * p3 + (highlight === 'flux' ? 0.08 : 0)})`;
+    ctx.beginPath();
+    ctx.moveTo(start[0], start[1]);
+    ctx.arc(start[0], start[1], 92, baseAngle, baseAngle + angleRad, angleRad < 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 1.15);
+    glow.addColorStop(0, `rgba(255, 214, 102, ${0.055 + 0.08 * p3})`);
+    glow.addColorStop(1, 'rgba(255, 214, 102, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 1.15, 0, TWO_PI);
+    ctx.fill();
+    ctx.fillStyle = '#78d6ff';
+    ctx.beginPath();
+    ctx.arc(end[0], end[1], 4, 0, TWO_PI);
+    ctx.fill();
+  }
+
+  ctx.fillStyle = 'rgba(232, 242, 228, 0.84)';
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`holonomy = ${(angleRad * 180 / Math.PI).toFixed(2)} deg`, 16, 24);
+  ctx.fillText(`curvature flux = ${proofFormat(detail.area_flux_deg, 2)} deg`, 16, 42);
+  ctx.fillText('parallel transport returns rotated', 16, H - 18);
+}
+
+function isoProject(x, y, z, cx, cy, scale) {
+  return [cx + (x - y) * scale, cy + (x + y) * scale * 0.48 - z * scale * 1.05];
+}
+
+function drawParabolicSurfaceGrid(ctx, cx, cy, scale, phase) {
+  const height = (x, y) => 0.16 * (x * x - y * y)
+    + 0.75 * Math.exp(-((x - 2.0) ** 2 + y * y) / 3.0)
+    - 0.28 * Math.exp(-((x + 2.0) ** 2 + y * y) / 3.0);
+  const grid = 11;
+  for (let row = 0; row < grid; row += 1) {
+    const y = -4.5 + row * 9.0 / (grid - 1);
+    ctx.beginPath();
+    for (let column = 0; column < grid; column += 1) {
+      const x = -4.5 + column * 9.0 / (grid - 1);
+      const point = isoProject(x, y, height(x, y), cx, cy, scale);
+      if (column === 0) ctx.moveTo(point[0], point[1]); else ctx.lineTo(point[0], point[1]);
+    }
+    ctx.strokeStyle = `rgba(120, 210, 255, ${0.08 + 0.16 * phase})`;
+    ctx.stroke();
+  }
+  for (let column = 0; column < grid; column += 1) {
+    const x = -4.5 + column * 9.0 / (grid - 1);
+    ctx.beginPath();
+    for (let row = 0; row < grid; row += 1) {
+      const y = -4.5 + row * 9.0 / (grid - 1);
+      const point = isoProject(x, y, height(x, y), cx, cy, scale);
+      if (row === 0) ctx.moveTo(point[0], point[1]); else ctx.lineTo(point[0], point[1]);
+    }
+    ctx.strokeStyle = `rgba(120, 210, 255, ${0.08 + 0.16 * phase})`;
+    ctx.stroke();
+  }
+  return height;
+}
+
+function drawParabolicProofStage(ctx, W, H, clock, timeline, proof, highlight) {
+  const detail = proof && proof.detail ? proof.detail : {};
+  const p1 = easeInOutCubic(proofPhase(timeline, 0, 0.33));
+  const p2 = easeInOutCubic(proofPhase(timeline, 0.30, 0.72));
+  const p3 = easeInOutCubic(proofPhase(timeline, 0.68, 1));
+  const seamHot = highlight === 'seam' || highlight === 'pegs';
+  const asymptoticHot = highlight === 'asymptotic';
+  const cx = W * 0.5;
+  const cy = H * 0.46;
+  const scale = Math.min(W, H) / 15;
+  const height = drawParabolicSurfaceGrid(ctx, cx, cy, scale, p1);
+  const seam = [];
+  const seamHeight = (x) => height(x, -0.06 * x * x + 0.45 * Math.sin(x * 0.75));
+  for (let index = 0; index <= 80; index += 1) {
+    const x = -4.5 + index * 9.0 / 80;
+    const y = -0.06 * x * x + 0.45 * Math.sin(x * 0.75);
+    seam.push(isoProject(x, y, seamHeight(x), cx, cy, scale));
+  }
+  ctx.save();
+  ctx.strokeStyle = `rgba(77, 235, 235, ${0.25 + 0.65 * p2 + (seamHot ? 0.16 : 0)})`;
+  ctx.lineWidth = seamHot ? 4 : 2.5;
+  ctx.shadowColor = seamHot ? '#78ebff' : 'rgba(77, 235, 235, 0.4)';
+  ctx.shadowBlur = seamHot ? 20 : 8;
+  traceProofPolyline(ctx, seam, false);
+  ctx.stroke();
+  ctx.restore();
+
+  const pegs = detail.pegs || [];
+  const pegPositions = [-2.8, 0.0, 2.8];
+  const directions = Array.isArray(detail.asymptotic_directions) && detail.asymptotic_directions.length
+    ? detail.asymptotic_directions
+    : [detail.asymptotic_direction || [1, 0]];
+  pegPositions.forEach((x, index) => {
+    if (p2 < (index + 1) / 4) return;
+    const y = -0.06 * x * x + 0.45 * Math.sin(x * 0.75);
+    const point = isoProject(x, y, height(x, y), cx, cy, scale);
+    const radius = 5 + 3 * Math.sin(clock * 3 + index);
+    ctx.fillStyle = '#ffd166';
+    ctx.beginPath();
+    ctx.arc(point[0], point[1], radius, 0, TWO_PI);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 214, 102, 0.6)';
+    ctx.beginPath();
+    ctx.arc(point[0], point[1], radius + 7, 0, TWO_PI);
+    ctx.stroke();
     ctx.fillStyle = '#e0e7ff';
     ctx.font = '12px monospace';
-    ctx.fillText(String(label), x + 8, y - 8);
+    ctx.fillText(`P${index + 1}`, point[0] + 8, point[1] - 8);
+
+    if (p3 > 0.001) {
+      const direction = proofDirection(directions[index % directions.length] || [1, 0]);
+      const tangentA = isoProject(x - 0.65, y - 0.24, height(x - 0.65, y - 0.24), cx, cy, scale);
+      const tangentB = isoProject(x + 0.65, y + 0.24, height(x + 0.65, y + 0.24), cx, cy, scale);
+      ctx.save();
+      ctx.strokeStyle = `rgba(255, 214, 102, ${0.25 + 0.45 * p3 + (asymptoticHot ? 0.16 : 0)})`;
+      ctx.fillStyle = 'rgba(255, 214, 102, 0.06)';
+      ctx.lineWidth = asymptoticHot ? 3 : 1.8;
+      ctx.beginPath();
+      ctx.moveTo(tangentA[0], tangentA[1]);
+      ctx.lineTo(tangentB[0], tangentB[1]);
+      ctx.stroke();
+      const lineScale = 46;
+      const screenDirection = proofDirection([
+        direction[0] + direction[1],
+        direction[1] - direction[0],
+      ]);
+      drawProofArrow(ctx, point, screenDirection, lineScale, 'rgba(77, 235, 235, 0.95)', false, asymptoticHot ? 3 : 2);
+      ctx.restore();
+    }
   });
-  ctx.fillStyle = 'rgba(232, 242, 228, 0.85)';
-  ctx.font = '13px monospace';
-  const tolerance = Number(detail.tolerance) || 0.004;
-  ctx.fillText(`parabolic band |K| <= ${tolerance.toFixed(6)}`, 16, 24);
-  ctx.fillText(`confirmed pegs = ${Number(detail.valid_pegs) || 0} / 3`, 16, 42);
+
+  ctx.fillStyle = 'rgba(232, 242, 228, 0.84)';
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`parabolic band |K| <= ${formatCurvature(detail.tolerance_k, 5)}`, 16, 24);
+  ctx.fillText(`verified pegs = ${detail.valid_pegs !== undefined ? detail.valid_pegs : 0} / 3`, 16, 42);
+  ctx.fillText('zero-curvature seam: one principal curvature vanishes', 16, H - 18);
 }
 
-function drawHomotopyProofFrame(ctx, W, H, time, proof) {
-  const detail = proof.detail || {};
-  const cx = W / 2;
-  const cy = H / 2 + 18;
-  const R = 112;
-  const r = 42;
-  ctx.lineWidth = 1.2;
-  for (let u = 0; u < TWO_PI; u += Math.PI / 10) {
-    ctx.strokeStyle = 'rgba(120, 210, 255, 0.16)';
+function projectTorusPoint(u, v, cx, cy, scale, yaw, pitch, R = 1.0, r = 0.38) {
+  const ring = R + r * Math.cos(v);
+  let x = ring * Math.cos(u);
+  let y = ring * Math.sin(u);
+  let z = r * Math.sin(v);
+  const cyaw = Math.cos(yaw);
+  const syaw = Math.sin(yaw);
+  const x1 = x * cyaw - y * syaw;
+  const y1 = x * syaw + y * cyaw;
+  const cp = Math.cos(pitch);
+  const sp = Math.sin(pitch);
+  const y2 = y1 * cp - z * sp;
+  const z2 = y1 * sp + z * cp;
+  return [cx + x1 * scale, cy - z2 * scale + y2 * 0.18 * scale];
+}
+
+function drawHomotopyProofStage(ctx, W, H, clock, timeline, proof, highlight) {
+  const detail = proof && proof.detail ? proof.detail : {};
+  const p1 = easeInOutCubic(proofPhase(timeline, 0, 0.33));
+  const p2 = easeInOutCubic(proofPhase(timeline, 0.30, 0.72));
+  const p3 = easeInOutCubic(proofPhase(timeline, 0.68, 1));
+  const torusHot = highlight === 'torus';
+  const windingHot = highlight === 'winding';
+  const holeHot = highlight === 'hole';
+  const cx = W * 0.5;
+  const cy = H * 0.5;
+  const scale = Math.min(W, H) * 0.30;
+  const yaw = 0.55 + clock * 0.18;
+  const pitch = 0.48 + 0.12 * Math.sin(clock * 0.5);
+  const project = (u, v) => projectTorusPoint(u, v, cx, cy, scale, yaw, pitch);
+
+  ctx.save();
+  ctx.lineWidth = 1;
+  for (let u = 0; u < TWO_PI; u += Math.PI / 9) {
+    ctx.strokeStyle = `rgba(120, 210, 255, ${0.08 + 0.10 * p1 + (torusHot ? 0.08 : 0)})`;
     ctx.beginPath();
-    for (let v = 0; v <= TWO_PI + 0.1; v += 0.16) {
-      const rr = R + r * Math.cos(v);
-      const x = cx + rr * Math.cos(u);
-      const y = cy + rr * Math.sin(u) * 0.56 - r * Math.sin(v) * 0.72;
-      if (v === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    for (let v = 0; v <= TWO_PI + 0.1; v += 0.14) {
+      const point = project(u, v);
+      if (v === 0) ctx.moveTo(point[0], point[1]); else ctx.lineTo(point[0], point[1]);
     }
     ctx.stroke();
   }
   for (let v = 0; v < TWO_PI; v += Math.PI / 6) {
-    ctx.strokeStyle = 'rgba(120, 210, 255, 0.14)';
+    ctx.strokeStyle = `rgba(120, 210, 255, ${0.06 + 0.10 * p1 + (torusHot ? 0.08 : 0)})`;
     ctx.beginPath();
-    for (let u = 0; u <= TWO_PI + 0.1; u += 0.16) {
-      const rr = R + r * Math.cos(v);
-      const x = cx + rr * Math.cos(u);
-      const y = cy + rr * Math.sin(u) * 0.56 - r * Math.sin(v) * 0.72;
-      if (u === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    for (let u = 0; u <= TWO_PI + 0.1; u += 0.14) {
+      const point = project(u, v);
+      if (u === 0) ctx.moveTo(point[0], point[1]); else ctx.lineTo(point[0], point[1]);
     }
     ctx.stroke();
   }
-  const pulse = 0.5 + 0.5 * Math.sin(time * 2.2);
-  ctx.strokeStyle = `rgba(255, 214, 102, ${0.58 + 0.38 * pulse})`;
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  for (let a = 0; a <= TWO_PI + 0.12; a += 0.12) {
-    const rr = R + r * Math.cos(a);
-    const x = cx + rr * Math.cos(a);
-    const y = cy + rr * Math.sin(a) * 0.56 - r * Math.sin(a) * 0.72;
-    if (a === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  ctx.restore();
+
+  const windingU = proofNumber(detail.winding_u, 1);
+  const direction = windingU < 0 ? -1 : 1;
+  const path = [];
+  for (let index = 0; index <= 100; index += 1) {
+    const u = TWO_PI * direction * index / 100;
+    path.push(project(u, 0));
   }
-  ctx.stroke();
-  ctx.strokeStyle = 'rgba(255, 120, 120, 0.85)';
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(cx, cy, R - r * 0.6, 0, TWO_PI); ctx.stroke();
-  ctx.fillStyle = 'rgba(232, 242, 228, 0.85)';
-  ctx.font = '13px monospace';
-  const phase = Number(detail.phase_max_pi);
-  if (Number.isFinite(phase)) ctx.fillText(`phase = ${phase.toFixed(3)} pi`, 16, 24);
-  if (Number.isFinite(Number(detail.winding_max))) {
-    ctx.fillText(`winding = ${Number(detail.winding_max).toFixed(3)}`, 16, 42);
+  if (p2 > 0.001) {
+    ctx.save();
+    ctx.strokeStyle = `rgba(255, 214, 102, ${0.35 + 0.55 * p2 + (windingHot ? 0.15 : 0)})`;
+    ctx.lineWidth = windingHot ? 4 : 2.6;
+    ctx.shadowColor = '#ffd166';
+    ctx.shadowBlur = windingHot ? 20 : 10;
+    ctx.beginPath();
+    const end = Math.max(2, Math.floor(path.length * easeInOutCubic(p2)));
+    for (let index = 0; index < end; index += 1) {
+      if (index === 0) ctx.moveTo(path[index][0], path[index][1]); else ctx.lineTo(path[index][0], path[index][1]);
+    }
+    ctx.stroke();
+    const head = path[Math.max(0, end - 1)];
+    ctx.fillStyle = '#ffd166';
+    ctx.beginPath();
+    ctx.arc(head[0], head[1], 6 + 2 * Math.sin(clock * 4), 0, TWO_PI);
+    ctx.fill();
+    ctx.restore();
   }
-  ctx.fillText('the central hole blocks contraction', 16, H - 18);
+
+  if (p3 > 0.001) {
+    const inner = scale * 0.48;
+    const outer = scale * 0.86;
+    const lassoRadius = proofLerp(outer, inner, easeInOutCubic(p3));
+    ctx.save();
+    ctx.setLineDash([8, 6]);
+    ctx.strokeStyle = `rgba(255, 120, 120, ${0.55 + 0.25 * p3 + (holeHot ? 0.15 : 0)})`;
+    ctx.lineWidth = holeHot ? 3.5 : 2.4;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + scale * 0.02, lassoRadius, lassoRadius * 0.48, 0, 0, TWO_PI);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + scale * 0.02, inner * 0.92, inner * 0.40, 0, 0, TWO_PI);
+    ctx.fillStyle = `rgba(255, 120, 120, ${0.04 + 0.08 * p3})`;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 120, 120, 0.75)';
+    ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = 'rgba(255, 180, 180, 0.92)';
+    ctx.font = '12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('the central hole blocks contraction', cx, cy + inner * 0.55);
+  }
+
+  ctx.fillStyle = 'rgba(232, 242, 228, 0.84)';
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`winding = (${proofFormat(detail.winding_u, 3)}, ${proofFormat(detail.winding_v, 3)})`, 16, 24);
+  ctx.fillText(`pi_1 = ${detail.fundamental_group || 'Z + Z'}`, 16, 42);
+  ctx.fillText(`genus = ${detail.genus !== undefined && detail.genus !== null ? detail.genus : '-'}`, 16, H - 18);
+}
+function bindProofHighlighting() {
+  const details = el('proof-details');
+  if (!details || details.dataset.highlightBound === 'true') return;
+  details.dataset.highlightBound = 'true';
+  details.addEventListener('mouseover', (event) => {
+    const target = event.target.closest('[data-proof-highlight]');
+    if (!target || target.contains(event.relatedTarget)) return;
+    if (proofAnimator) proofAnimator.setHighlight(target.dataset.proofHighlight);
+  });
+  details.addEventListener('mouseout', (event) => {
+    const target = event.target.closest('[data-proof-highlight]');
+    if (!target || target.contains(event.relatedTarget)) return;
+    if (proofAnimator) proofAnimator.setHighlight(null);
+  });
 }
 
 function startProofAnimation() {
-  stopProofAnimation();
-  const canvas = el('proof-canvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width;
-  const H = canvas.height;
-  const started = performance.now();
-  const frame = (now) => {
-    drawProofFrame(ctx, W, H, (now - started) / 1000);
-    proofFrame = window.requestAnimationFrame(frame);
-  };
-  proofFrame = window.requestAnimationFrame(frame);
+  if (proofAnimator) proofAnimator.start();
 }
 
 function stopProofAnimation() {
-  if (proofFrame) window.cancelAnimationFrame(proofFrame);
-  proofFrame = null;
+  if (proofAnimator) {
+    proofAnimator.stop();
+    proofAnimator = null;
+  }
 }
 
 function maybeShowQuestProof() {
@@ -1765,24 +2961,53 @@ function maybeShowQuestProof() {
 function showProof(proof) {
   state.proof = proof || {};
   state.proofOpen = true;
-  el('proof-title').textContent = proof && proof.title ? proof.title : 'Geometric Proof';
-  const list = el('proof-steps');
-  list.innerHTML = '';
-  for (const step of (proof && proof.steps) || []) {
-    const item = document.createElement('li');
-    item.textContent = step;
-    list.appendChild(item);
-  }
+  stopProofAnimation();
+  const safeProof = state.proof;
+  el('proof-title').textContent = safeProof.title || 'Geometric Proof';
+  el('proof-accept').textContent = safeProof.__guide ? 'Close Guide & Return to Surveying' : 'Accept Seal & Continue';
+  const relicBadge = el('proof-relic-badge');
+  const relic = safeProof.relic || (safeProof.detail && safeProof.detail.relic) || '';
+  relicBadge.textContent = relic;
+  relicBadge.classList.toggle('hidden', !relic);
+
+  const details = el('proof-steps');
+  details.innerHTML = '';
+  for (const card of buildProofCards(safeProof)) details.appendChild(card);
+  renderProofMath(details);
+
+  const dots = el('proof-step-dots');
+  dots.innerHTML = '';
+  const labels = proofStepLabels(safeProof.kind, Boolean(safeProof.detail && safeProof.detail.is_deficit));
+  labels.forEach((label, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'proof-step-dot';
+    button.dataset.step = String(index);
+    button.textContent = label;
+    button.addEventListener('click', () => {
+      if (proofAnimator) proofAnimator.setStep(index);
+    });
+    dots.appendChild(button);
+  });
+
   el('proof-modal').classList.remove('hidden');
-  startProofAnimation();
+  proofAnimator = new ProofAnimator(el('proof-canvas'), safeProof);
+  proofAnimator.resize();
+  bindProofHighlighting();
+  proofAnimator.start();
+}
+
+
+function showProofModal(proof) {
+  showProof(proof);
 }
 
 function hideProof() {
   stopProofAnimation();
   state.proofOpen = false;
+  el('proof-accept').textContent = 'Accept Seal & Continue';
   el('proof-modal').classList.add('hidden');
 }
-
 
 function continueFreeRoam() {
   hideVictory();
@@ -1793,6 +3018,7 @@ function continueFreeRoam() {
 
 function returnToLobby() {
   hideVictory();
+  el('defeat-modal').classList.add('hidden');
   state.cleared = false;
   el('cleared').classList.add('hidden');
   showLobby();
@@ -1929,17 +3155,19 @@ function updateReadouts() {
   el('pointers').textContent = `pointers ${p.pointer_uses_remaining}`;
   const z = (p.position3d || [0, 0, 0])[2] || 0;
   el('position').textContent = `(${p.position[0].toFixed(2)}, ${p.position[1].toFixed(2)}, ${z.toFixed(2)})`;
-  el('heading').textContent = `${(PHYS.heading * 180 / Math.PI).toFixed(1)}\u00b0`;
+  el('heading').textContent = formatAngle(PHYS.heading * 180 / Math.PI, 1);
   const slope = PHYS.slope || { slope: 0, speed_scale: 1 };
   const uphill = slope.slope > 0.001;
   el('slope').textContent =
     `${slope.slope >= 0 ? '+' : ''}${slope.slope.toFixed(3)} (x${slope.speed_scale.toFixed(2)}${uphill ? ', uphill' : ''})`;
   if (typeof p.signal === 'number') el('detector-text').textContent = `signal ${p.signal.toFixed(4)} (${p.label}, ${p.trend})`;
-  if (typeof p.curvature === 'number') el('curvature').textContent = p.curvature.toFixed(6);
+  if (typeof p.curvature === 'number') el('curvature').textContent = formatCurvature(p.curvature, 5);
   el('mode').textContent = state.godVisible ? 'god view (debug)' : 'top-down map';
   el('score').textContent = `${Math.round(p.score || 0)}`;
   el('scale-readout').textContent = `${(state.scaleFactor || 1).toFixed(2)}x`;
   el('difficulty-readout').textContent = difficultyLabel(state.difficulty);
+  const guideButton = el('field-guide');
+  if (guideButton) guideButton.classList.toggle('hidden', state.difficulty !== 'easy');
   const offline = state.difficulty === 'medium';
   const locked = Boolean(p.detector_locked);
   const offlineNote = el('sensor-offline');
@@ -1956,11 +3184,12 @@ function updateReadouts() {
   }
   renderQuest();
   if (state.codexOpen) renderCodex();
+  if (state.difficulty === 'hard') maybeShowDefeat();
 }
 
 function difficultyLabel(tier) {
   if (tier === 'medium') return 'Medium';
-  if (tier === 'hard') return 'Hard (reserved)';
+  if (tier === 'hard') return 'Hard - timed survival';
   return 'Easy';
 }
 
@@ -2062,7 +3291,9 @@ async function runTool(tool) {
       const result = await apiPost('/api/action/tool', { tool: 'mark', name: markerName(count) });
       spawnBeacon();
       await refreshState();
-      hintMessage(`Marker ${result.name} placed at (${result.position[0].toFixed(2)}, ${result.position[1].toFixed(2)}).`, 'ok');
+      const limit = state.player && typeof state.player.max_markers_allowed === 'number' ? state.player.max_markers_allowed : 0;
+      const remaining = limit > 0 ? Math.max(0, limit - (state.player.markers || []).length) : null;
+      hintMessage(`Marker ${result.name} placed at (${result.position[0].toFixed(2)}, ${result.position[1].toFixed(2)})${remaining !== null ? `; ${remaining} slots remaining` : ''}.`, 'ok');
       return;
     }
     hintMessage(`Unknown tool ${tool}.`, 'error');
@@ -2136,7 +3367,7 @@ function updateDifficultyNote() {
   if (tier === 'medium') {
     note.textContent = 'Medium: the distance detector is offline; use the eye pointer, curvature and the goniometer.';
   } else if (tier === 'hard') {
-    note.textContent = 'Hard is [Reserved / Work in Progress] - entering uses a safe placeholder with the detector offline.';
+    note.textContent = 'Hard: timed survival. Rope pool 500 m, maximum 8 marker pegs, quest countdown, detector offline.';
   } else {
     note.textContent = '';
   }
@@ -2163,6 +3394,11 @@ async function enterWorld() {
     state.selection = [];
     state.particles = [];
     state.beacons = [];
+    state.defeatShown = false;
+    state.timeRemaining = null;
+    state.timeRemainingAt = 0;
+    state.timerQuestId = null;
+    el('defeat-modal').classList.add('hidden');
     state.lastMeasure = null;
     state.pendingCut = null;
     state.angleMeasurements = {};
@@ -2211,8 +3447,17 @@ function selectSlot(slot) {
   updateQuestActionButton();
   const label = document.querySelector(`.hotbar .slot[data-slot="${state.slot}"] span`);
   const name = label ? label.textContent : '';
+  const player = state.player;
   if (state.ropeMode) {
-    hintMessage('Rope: select two path points.', 'info');
+    const remaining = player && typeof player.rope_remaining === 'number' ? formatLength(player.rope_remaining, 2) : '-';
+    const total = player && typeof player.rope_total === 'number' ? formatLength(player.rope_total, 2) : '-';
+    hintMessage(`Surveyor Rope: ${remaining} remaining of ${total}. Select two path points.`, 'info');
+  } else if (state.slot === 2) {
+    const count = player && Array.isArray(player.markers) ? player.markers.length : 0;
+    const limit = player && typeof player.max_markers_allowed === 'number' ? player.max_markers_allowed : 0;
+    const remaining = limit > 0 ? Math.max(0, limit - count) : null;
+    const suffix = limit > 0 ? ` / ${limit} placed, ${remaining} remaining` : ' placed';
+    hintMessage(`Marker Peg: ${count}${suffix}.`, 'info');
   } else if (state.measureMode) {
     hintMessage('Measure: choose Length or Angle.', 'info');
   } else {
@@ -2424,8 +3669,8 @@ async function pullCircumcircle(labels) {
       hintMessage(`Quest complete - ${result.proof.relic} claimed!`, 'ok');
     } else {
       hintMessage(
-        `Circumcircle pulled: C_real = ${Number(result.circumcircle.perimeter).toFixed(1)} m, ` +
-        `C_flat = ${Number(result.circumcircle.flat_perimeter).toFixed(1)} m.`,
+        `Circumcircle pulled: C_real = ${formatLength(Number(result.circumcircle.perimeter), 2)}, ` +
+        `C_flat = ${formatLength(Number(result.circumcircle.flat_perimeter), 2)}.`,
         'ok'
       );
     }
@@ -2507,7 +3752,7 @@ async function connectRope(a, b) {
     });
     applyRopeState(result);
     renderAll();
-    hintMessage(`Rope #${result.rope.id} tied: ${result.rope.length_3d.toFixed(2)} m (remaining ${result.rope_remaining.toFixed(2)} m).`, 'ok');
+    hintMessage(`Rope #${result.rope.id} tied: ${formatLength(result.rope.length_3d, 2)} (remaining ${formatLength(result.rope_remaining, 2)}).`, 'ok');
   } catch (error) {
     hintMessage(error.message, 'error');
   }
@@ -2518,7 +3763,7 @@ async function cutRope(ropeId) {
     const result = await apiPost('/api/action/tool', { tool: 'rope_clear', rope_id: ropeId });
     applyRopeState(result);
     renderAll();
-    hintMessage(`Rope #${ropeId} cut (remaining ${result.rope_remaining.toFixed(2)} m).`, 'ok');
+    hintMessage(`Rope #${ropeId} cut (remaining ${formatLength(result.rope_remaining, 2)}).`, 'ok');
   } catch (error) {
     hintMessage(error.message, 'error');
   }
@@ -2533,7 +3778,7 @@ async function clearRopes() {
     const result = await apiPost('/api/action/tool', { tool: 'rope_clear' });
     applyRopeState(result);
     renderAll();
-    hintMessage(`All ropes cut (remaining ${result.rope_remaining.toFixed(2)} m).`, 'ok');
+    hintMessage(`All ropes cut (remaining ${formatLength(result.rope_remaining, 2)}).`, 'ok');
   } catch (error) {
     hintMessage(error.message, 'error');
   }
@@ -2630,7 +3875,7 @@ async function handleMeasureClick(x, y) {
         mode: 'ruler',
         targets: [{ type: 'rope', id: rope.id }],
       });
-      hintMessage(`Rope #${result.rope_id} length: ${result.distance.toFixed(3)} m.`, 'ok');
+      hintMessage(`Rope #${result.rope_id} length: ${formatLength(result.distance, 2)}.`, 'ok');
     } catch (error) {
       hintMessage(error.message, 'error');
     }
@@ -2652,7 +3897,7 @@ async function handleMeasureClick(x, y) {
       const farNodes = (result.far_nodes || []).map((item) => ({ type: item.type, id: item.id, label: item.label }));
       const closing = farNodes.length === 2 ? findRopeBetween(farNodes[0], farNodes[1]) : null;
       if (!closing) {
-        hintMessage(`Angle at ${node.label}: ${result.angle_degrees.toFixed(2)} deg.`, 'ok');
+        hintMessage(`Angle at ${node.label}: ${formatAngle(result.angle_degrees, 2)}.`, 'ok');
         return;
       }
       const vertices = [node, ...farNodes];
@@ -2664,7 +3909,7 @@ async function handleMeasureClick(x, y) {
       const measured = Object.keys(entry.angles).length;
       if (measured < 3) {
         hintMessage(
-          `Angle at ${node.label}: ${result.angle_degrees.toFixed(2)} deg (${measured}/3 vertices measured).`,
+          `Angle at ${node.label}: ${formatAngle(result.angle_degrees, 2)} (${measured}/3 vertices measured).`,
           'info'
         );
         return;
@@ -2673,7 +3918,7 @@ async function handleMeasureClick(x, y) {
       delete state.angleMeasurements[key];
       const summed = await apiPost('/api/action/tool', { tool: 'measure', mode: 'angle_sum', targets });
       hintMessage(
-        `Triangle angle sum: ${summed.angle_sum_degrees.toFixed(2)} deg (excess ${summed.excess_degrees.toFixed(2)} deg).`,
+        `Triangle angle sum: ${formatAngle(summed.angle_sum_degrees, 2)} (excess ${formatAngle(summed.excess_degrees, 2)}).`,
         'ok'
       );
       if (summed.quest_completed && summed.proof) {
@@ -2761,8 +4006,10 @@ function renderCodex() {
         `${label} ${shown} / ${target.toFixed(2)} pi (${Math.round((quest.progress || 0) * 100)}%)`;
     } else {
       const suffix = quest.objective_unit === 'ratio' ? '' : ' deg';
+      const relation = quest.objective_relation === '<=' ? '<=' : '>=';
       el('codex-progress').textContent =
-        `${label} ${shown} / ${target.toFixed(quest.objective_unit === 'ratio' ? 4 : 1)}${suffix} (${Math.round((quest.progress || 0) * 100)}%)`;
+        `${label} ${shown} ${relation} ${target.toFixed(quest.objective_unit === 'ratio' ? 4 : 1)}${suffix} (${Math.round((quest.progress || 0) * 100)}%)`;
+
     }
   } else {
     el('codex-progress').textContent = 'All geometric seals claimed';
@@ -2813,6 +4060,8 @@ window.addEventListener('keydown', (event) => {
     if (state.slot !== 4) selectSlot(4);
   } else if (key === 'j') {
     toggleCodex();
+  } else if (key === 'h') {
+    showExampleGuide();
   } else if (key === 'c') {
     if (state.player && (state.player.ropes || []).length) askCut('all');
   } else if (key === 'escape' && state.proofOpen) {
@@ -2895,7 +4144,16 @@ updateScaleField();
 updateDifficultyNote();
 el('victory-continue').addEventListener('click', continueFreeRoam);
 el('victory-lobby').addEventListener('click', returnToLobby);
+el('defeat-continue').addEventListener('click', continueAfterDefeat);
+el('defeat-lobby').addEventListener('click', returnToLobby);
 el('proof-accept').addEventListener('click', hideProof);
+el('field-guide').addEventListener('click', showExampleGuide);
+el('proof-replay').addEventListener('click', () => {
+  if (proofAnimator) proofAnimator.replay();
+});
+window.addEventListener('resize', () => {
+  if (proofAnimator) proofAnimator.resize();
+});
 el('open-lobby').addEventListener('click', showLobby);
 el('step-size').addEventListener('change', (event) => {
   state.speedMultiplier = clamp(Number(event.target.value) || 1, 0.25, 4);

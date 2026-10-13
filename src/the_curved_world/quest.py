@@ -10,6 +10,7 @@ exit-seal state that the game/session expose to the player.
 from __future__ import annotations
 
 import math
+import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -20,6 +21,7 @@ from src.the_curved_world.scanner import (
     BDP_MAX_KR2,
     BDP_MIN_KMAX,
     ManifoldFeatures,
+    TRIANGLE_DIFFICULTY_FRACTIONS,
 )
 
 
@@ -76,6 +78,7 @@ class ParabolicMeasurement:
     curvatures: Tuple[float, ...]
     principal_curvatures: Tuple[Tuple[float, float], ...] = ()
     pairwise_distances: Tuple[float, ...] = ()
+    asymptotic_directions: Tuple[Tuple[float, float], ...] = ()
     kind: str = "parabolic_line"
 
 
@@ -140,7 +143,7 @@ class GeometricQuest(ABC):
 
 
 class GaussBonnetQuest(GeometricQuest):
-    """Quest 1: enclose enough positive curvature to beat an angle-sum target."""
+    """Quest 1: angle excess on positive curvature, or deficit on a saddle."""
 
     id = "gauss_bonnet_excess"
     title = "Gauss-Bonnet Angle Excess"
@@ -149,50 +152,151 @@ class GaussBonnetQuest(GeometricQuest):
         "to enclose a triangle whose interior angle sum beats the adaptive target."
     )
     hint = (
-        "For a small triangle, (sum of angles - 180 deg) equals the integral of K dA. "
-        "Stay near a convex bump and widen the triangle if the measured excess is short."
+        "Spaces bulge outward, birthing extra degrees. Stay near a convex bump and "
+        "widen the triangle if the measured excess is short."
     )
     relic_name = "Curvature Seal"
     objective_label = "Angle Sum"
+    objective_relation = ">="
+
+    def __init__(self, mode: str = "excess", difficulty: str = "easy") -> None:
+        normalized_mode = str(mode).strip().lower()
+        normalized_difficulty = str(difficulty).strip().lower()
+        if normalized_mode not in ("excess", "deficit"):
+            raise ValueError("GaussBonnetQuest.mode must be excess or deficit")
+        if normalized_difficulty not in TRIANGLE_DIFFICULTY_FRACTIONS:
+            raise ValueError("GaussBonnetQuest.difficulty must be one of easy/medium/hard")
+        self.mode = normalized_mode
+        self.difficulty = normalized_difficulty
+        if self.mode == "deficit":
+            self.title = "Gauss-Bonnet Angle Deficit"
+            self.description = (
+                "Find a hyperbolic trough with strong negative curvature, lay a triangular "
+                "cord across the saddle, and measure an interior angle sum below the target."
+            )
+            self.hint = (
+                "Deep within the twisting saddle (K << 0), space tears inward, consuming "
+                "angles below 180 degrees. Lay your triangular cord across the hyperbolic trough."
+            )
+            self.objective_relation = "<="
+        else:
+            self.title = "Gauss-Bonnet Angle Excess"
+            self.description = (
+                "Find a positive-curvature ridge, place three beacons and use the goniometer "
+                "to enclose a triangle whose interior angle sum beats the adaptive target."
+            )
+            self.hint = (
+                "Spaces bulge outward, birthing extra degrees. Stay near a convex bump and "
+                "widen the triangle if the measured excess is short."
+            )
+            self.objective_relation = ">="
 
     def is_applicable(self, features: ManifoldFeatures) -> bool:
+        if self.mode == "deficit":
+            return bool(
+                getattr(features, "negative_saddle", False)
+                or (
+                    float(getattr(features, "k_min", 0.0)) < -1e-5
+                    and float(getattr(features, "reference_deficit", 0.0)) > 1e-6
+                )
+            )
         return bool(features.k_max > 0.0 and features.reference_excess > 1e-6)
 
     def target_value(self, features: ManifoldFeatures) -> float:
-        """Adaptive angle-sum target in radians.
-
-        The reference excess is what a reachable triangle on the positive peak
-        already achieves, so the target is always strictly above 180 deg and
-        strictly below the measured physical maximum (never unwinnable).
-        """
-        reference = max(float(features.reference_excess), 1e-9)
-        desired = 0.60 * reference
-        window_low = min(math.radians(20.0), 0.50 * reference)
-        window_high = min(math.radians(80.0), 0.85 * reference)
-        excess_target = _clamp(desired, window_low, window_high)
-        excess_target = min(excess_target, 0.95 * reference)
-        return math.pi + max(0.0, excess_target)
+        """Return the prechecked angle-sum target in radians."""
+        fraction = TRIANGLE_DIFFICULTY_FRACTIONS[self.difficulty]
+        if self.mode == "deficit":
+            stored = getattr(features, f"deficit_target_{self.difficulty}", None)
+            reference = max(0.0, float(getattr(features, "reference_deficit", 0.0)))
+            if stored is not None and math.isfinite(float(stored)) and float(stored) < math.pi:
+                return float(stored)
+            return math.pi - fraction * reference
+        stored = getattr(features, f"excess_target_{self.difficulty}", None)
+        reference = max(0.0, float(getattr(features, "reference_excess", 0.0)))
+        if stored is not None and math.isfinite(float(stored)) and float(stored) > math.pi:
+            return float(stored)
+        return math.pi + fraction * reference
 
     def evaluate(self, features: ManifoldFeatures, measurement: TriangleMeasurement) -> QuestResult:
         target = self.target_value(features)
         achieved = float(measurement.angle_sum)
+        if self.mode == "deficit":
+            deficit = math.pi - achieved
+            target_deficit = max(1e-9, math.pi - target)
+            progress = _clamp(deficit / target_deficit, 0.0, 1.0)
+            completed = bool(achieved <= target + 1e-12)
+            steps = [
+                "Gauss-Bonnet on a geodesic triangle: sum(theta_i) - pi = integral_T K dA.",
+                "Inside a negative-curvature saddle, integral_T K dA < 0, so the angle sum falls below 180 degrees.",
+                "Measured interior angle sum: %.2f deg (deficit %.2f deg)." % (
+                    math.degrees(achieved),
+                    math.degrees(max(0.0, deficit)),
+                ),
+                "Adaptive upper target: <= %.2f deg (reference saddle deficit %.2f deg, precheck-clamped)." % (
+                    math.degrees(target),
+                    math.degrees(max(0.0, float(getattr(features, "reference_deficit", 0.0)))),
+                ),
+                "Relic awarded: %s." % self.relic_name,
+            ]
+            detail = {
+                "kind": self.id,
+                "mode": "deficit",
+                "is_deficit": True,
+                "target_relation": "<=",
+                "theorem": "Gauss-Bonnet: sum(theta_i) - pi = integral_T K dA < 0 (geodesic triangle in a negative-curvature saddle)",
+                "steps": steps,
+                "measured_sum": achieved,
+                "target_sum": target,
+                "excess_rad": achieved - math.pi,
+                "target_excess_rad": target - math.pi,
+                "angle_deficit_rad": deficit,
+                "angle_deficit_deg": math.degrees(deficit),
+                "target_deficit_rad": math.pi - target,
+                "target_deficit_deg": math.degrees(math.pi - target),
+                "reference_deficit_rad": float(getattr(features, "reference_deficit", 0.0)),
+                "reference_deficit_degrees": math.degrees(max(0.0, float(getattr(features, "reference_deficit", 0.0)))),
+                "angle_sum_degrees": math.degrees(achieved),
+                "target_degrees": math.degrees(target),
+                "excess_degrees": math.degrees(achieved - math.pi),
+                "target_excess_degrees": math.degrees(target - math.pi),
+                "reference_excess_degrees": math.degrees(max(0.0, float(getattr(features, "reference_excess", 0.0)))),
+                "k_min": float(getattr(features, "k_min", 0.0)),
+                "k_max": float(features.k_max),
+                "area_flux_negative": True,
+                "genus": features.genus,
+                "markers": list(measurement.markers),
+                "relic": self.relic_name,
+            }
+            return QuestResult(self.id, completed, progress, achieved, target, detail)
+
         span = max(target - math.pi, 1e-9)
         progress = _clamp((achieved - math.pi) / span, 0.0, 1.0)
         completed = bool(achieved >= target)
         detail = {
+            "kind": self.id,
+            "mode": "excess",
+            "is_deficit": False,
+            "target_relation": ">=",
             "theorem": "Gauss-Bonnet: sum(theta_i) - pi = integral_T K dA (geodesic triangle)",
+            "measured_sum": achieved,
+            "target_sum": target,
+            "excess_rad": achieved - math.pi,
+            "target_excess_rad": target - math.pi,
+            "angle_deficit_rad": math.pi - achieved,
+            "angle_deficit_deg": math.degrees(math.pi - achieved),
+            "reference_excess_rad": float(getattr(features, "reference_excess", 0.0)),
             "angle_sum_degrees": math.degrees(achieved),
             "target_degrees": math.degrees(target),
             "excess_degrees": math.degrees(achieved - math.pi),
             "target_excess_degrees": math.degrees(target - math.pi),
-            "reference_excess_degrees": math.degrees(features.reference_excess),
+            "reference_excess_degrees": math.degrees(max(0.0, float(getattr(features, "reference_excess", 0.0)))),
             "k_max": features.k_max,
+            "area_flux_negative": bool(achieved < math.pi),
             "genus": features.genus,
             "markers": list(measurement.markers),
             "relic": self.relic_name,
         }
         return QuestResult(self.id, completed, progress, achieved, target, detail)
-
 
 class BertrandDiquetPuisseuxQuest(GeometricQuest):
     """Quest 2: verify geodesic circle shrinkage on a positive curvature dome."""
@@ -284,7 +388,9 @@ class BertrandDiquetPuisseuxQuest(GeometricQuest):
             "vertices": list(measurement.vertex_labels),
             "triangle_labels": list(labels),
             "perimeter": perimeter,
+            "real_perimeter": perimeter,
             "mean_radius": radius,
+            "radius": radius,
             "circle_perimeter": circle,
             "flat_perimeter": flat_reference,
             "flat_polygon_perimeter": flat_polygon,
@@ -292,8 +398,16 @@ class BertrandDiquetPuisseuxQuest(GeometricQuest):
             "ratio_circle": ratio_circle,
             "target_ratio": target,
             "deficit": deficit,
+            "deficit_ratio": deficit,
             "k_estimate": k_estimate,
             "k_analytic": analytic_k,
+            "k_est": k_estimate,
+            "k_exact": analytic_k,
+            "relative_error": (
+                abs(k_estimate - analytic_k) / abs(analytic_k)
+                if abs(analytic_k) > 1e-12
+                else 0.0
+            ),
             "center_curvature": measurement.center_curvature,
             "is_circumcircle": circumcircle,
             "relic": self.relic_name,
@@ -360,10 +474,25 @@ class HolonomyQuest(GeometricQuest):
                 self.relic_name,
             ),
         ]
+        reference_flux = abs(float(features.holonomy_reference_angle))
+        relative_error = (
+            abs(achieved - reference_flux) / reference_flux
+            if reference_flux > 1e-12
+            else 0.0
+        )
         detail = {
             "kind": self.id,
             "steps": steps,
             "theorem": "Ambrose-Singer: parallel transport around a closed loop rotates by integral K dA modulo 2*pi.",
+            "start_vector": list(measurement.vector_start),
+            "end_vector": list(measurement.vector_end),
+            "holonomy_angle_deg": math.degrees(achieved),
+            "holonomy_angle_rad": achieved,
+            "target_angle_deg": math.degrees(target),
+            "target_angle_rad": target,
+            "area_flux_rad": reference_flux,
+            "area_flux_deg": math.degrees(reference_flux),
+            "relative_error": relative_error,
             "holonomy_angle": achieved,
             "holonomy_degrees": math.degrees(achieved),
             "target_angle": target,
@@ -445,19 +574,41 @@ class ParabolicLineQuest(GeometricQuest):
                 self.relic_name,
             ),
         ]
+        principal_by_index = list(principal)
+        while len(principal_by_index) < len(labels):
+            principal_by_index.append([0.0, 0.0])
+        directions = [
+            [float(pair[0]), float(pair[1])]
+            for pair in measurement.asymptotic_directions
+            if isinstance(pair, (tuple, list)) and len(pair) >= 2
+        ]
+        pegs = [
+            {
+                "k": float(curvatures[index]) if index < len(curvatures) else 0.0,
+                "kappa1": float(principal_by_index[index][0]),
+                "kappa2": float(principal_by_index[index][1]),
+            }
+            for index, _label in enumerate(labels)
+        ]
+        asymptotic_direction = directions[0] if directions else [1.0, 0.0]
         detail = {
             "kind": self.id,
             "steps": steps,
             "theorem": "K = det(I^-1 II) = kappa_1 * kappa_2; a parabolic point has a zero principal curvature.",
+            "pegs": pegs,
             "labels": list(labels),
             "curvatures": list(curvatures),
             "principal_curvatures": principal,
+            "asymptotic_directions": directions,
+            "asymptotic_direction": asymptotic_direction,
             "pairwise_distances": list(distances),
             "valid_pegs": int(valid_count),
             "target_pegs": 3,
             "tolerance": tolerance,
+            "tolerance_k": tolerance,
             "min_distance": d_min,
             "spacing_ok": spacing_ok,
+            "is_parabolic_verified": bool(completed),
             "relic": self.relic_name,
         }
         return QuestResult(self.id, completed, progress, float(valid_count), 3.0, detail)
@@ -517,16 +668,33 @@ class HomotopyLoopQuest(GeometricQuest):
                 self.relic_name,
             ),
         ]
+        genus = features.genus
+        if genus is None:
+            fundamental_group = "trivial"
+        elif int(genus) == 1:
+            fundamental_group = "Z + Z"
+        elif int(genus) >= 2:
+            fundamental_group = f"free group rank {2 * int(genus)}"
+        else:
+            fundamental_group = "trivial"
         detail = {
             "kind": self.id,
             "steps": steps,
             "theorem": "On a genus-g >= 1 closed surface, pi_1 is non-trivial and a coordinate loop has non-zero winding.",
+            "u_start": 0.0,
+            "u_end": phase_u,
+            "v_start": 0.0,
+            "v_end": phase_v,
+            "delta_u": phase_u,
+            "delta_v": phase_v,
             "phase_u": phase_u,
             "phase_v": phase_v,
             "phase_max_pi": phase_max / math.pi,
             "winding_u": phase_u / (2.0 * math.pi),
             "winding_v": phase_v / (2.0 * math.pi),
             "winding_max": winding_max,
+            "genus": genus,
+            "fundamental_group": fundamental_group,
             "closure_distance": float(measurement.closure_distance),
             "capture_radius": capture,
             "origin_label": measurement.origin_label,
@@ -545,13 +713,20 @@ class QuestManager:
         features: ManifoldFeatures,
         seed: int,
         quests: Optional[Sequence[GeometricQuest]] = None,
+        difficulty: str = "easy",
+        gauss_mode: Optional[str] = None,
     ) -> None:
         self._features = features
+        normalized_difficulty = str(difficulty).strip().lower()
+        if normalized_difficulty not in TRIANGLE_DIFFICULTY_FRACTIONS:
+            raise ValueError("QuestManager.difficulty must be one of easy/medium/hard")
+        self.difficulty = normalized_difficulty
+        self._gauss_mode = self._select_gauss_mode(features, int(seed), normalized_difficulty, gauss_mode)
         pool: List[GeometricQuest] = (
             list(quests)
             if quests is not None
             else [
-                GaussBonnetQuest(),
+                GaussBonnetQuest(mode=self._gauss_mode, difficulty=normalized_difficulty),
                 BertrandDiquetPuisseuxQuest(),
                 HolonomyQuest(),
                 ParabolicLineQuest(),
@@ -576,11 +751,41 @@ class QuestManager:
         self._last_proof: Optional[Dict[str, Any]] = None
         self._features_payload = features.to_dict()
 
+    @staticmethod
+    def _select_gauss_mode(
+        features: ManifoldFeatures,
+        seed: int,
+        difficulty: str,
+        explicit: Optional[str],
+    ) -> str:
+        if explicit is not None:
+            normalized = str(explicit).strip().lower()
+            if normalized not in ("excess", "deficit"):
+                raise ValueError("gauss_mode must be excess or deficit")
+            return normalized
+        has_negative_saddle = bool(
+            getattr(features, "negative_saddle", False)
+            or (
+                float(getattr(features, "k_min", 0.0)) < -1e-5
+                and float(getattr(features, "reference_deficit", 0.0)) > 1e-6
+            )
+        )
+        # Easy keeps the authored excess-first tutorial path.  Medium and hard
+        # may dispatch either direction when the map exposes a real saddle.
+        if difficulty == "easy" or not has_negative_saddle:
+            return "excess"
+        chooser = random.Random(int(seed) ^ 0x5EED)
+        return "deficit" if chooser.random() < 0.5 else "excess"
+
     # -- read-only state ---------------------------------------------------
 
     @property
     def features(self) -> ManifoldFeatures:
         return self._features
+
+    @property
+    def gauss_mode(self) -> str:
+        return self._gauss_mode
 
     @property
     def active_quest(self) -> Optional[GeometricQuest]:
@@ -710,13 +915,18 @@ class QuestManager:
         return {
             "quest_id": quest.id,
             "kind": detail.get("kind", quest.id),
+            "mode": detail.get("mode", getattr(quest, "mode", "excess")),
+            "is_deficit": bool(detail.get("is_deficit", getattr(quest, "mode", "excess") == "deficit")),
+            "target_relation": detail.get("target_relation", getattr(quest, "objective_relation", ">=")),
             "title": quest.title,
             "theorem": detail.get("theorem", ""),
             "steps": steps,
             "angle_sum_degrees": detail.get("angle_sum_degrees"),
             "target_degrees": detail.get("target_degrees"),
             "excess_degrees": detail.get("excess_degrees"),
+            "angle_deficit_degrees": detail.get("angle_deficit_degrees"),
             "reference_excess_degrees": detail.get("reference_excess_degrees"),
+            "area_flux_negative": detail.get("area_flux_negative"),
             "relic": quest.relic_name,
             "detail": dict(detail),
         }
@@ -730,6 +940,8 @@ class QuestManager:
         progress = 0.0 if self._last_result is None else float(self._last_result.progress)
         return {
             "id": None if quest is None else quest.id,
+            "mode": None if quest is None else getattr(quest, "mode", None),
+            "objective_relation": None if quest is None else getattr(quest, "objective_relation", "="),
             "title": quest.title if quest is not None else "All geometric seals claimed",
             "description": quest.description if quest is not None else "The exit seal is open.",
             "hint": quest.hint if quest is not None else "",

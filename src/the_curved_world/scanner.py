@@ -59,10 +59,27 @@ class ManifoldFeatures:
     parabolic_tolerance: float = 0.004
     parabolic_min_distance: float = 2.0
     homotopy_capture_radius: float = 3.0
+    saddle: Tuple[float, float] = (0.0, 0.0)
+    reference_deficit: float = 0.0
+    reference_deficit_angle_sum: float = math.pi
+    reference_deficit_radius: float = 0.0
+    excess_target_easy: float = math.pi
+    excess_target_medium: float = math.pi
+    excess_target_hard: float = math.pi
+    deficit_target_easy: float = math.pi
+    deficit_target_medium: float = math.pi
+    deficit_target_hard: float = math.pi
 
     @property
     def positive_peak(self) -> bool:
         return self.k_max > 0.0
+
+    @property
+    def negative_saddle(self) -> bool:
+        # Closed manifolds use curvature scales from ~1e-4 to ~1; the
+        # deficit magnitude is the physical gate, while this relative floor
+        # avoids treating numerical noise as a saddle.
+        return self.reference_deficit > 1e-6 and self.k_min < -1e-5
 
     def to_dict(self) -> Dict[str, object]:
         """Player-safe summary: extremes and topology only, never coordinates."""
@@ -74,6 +91,7 @@ class ManifoldFeatures:
             "genus": self.genus,
             "closed": self.closed,
             "has_positive_peak": self.positive_peak,
+
             "bdp_ratio_target": self.bdp_ratio_target,
             "has_holonomy_flux": self.curvature_abs_integral > 0.05,
             "holonomy_target_angle_degrees": math.degrees(self.holonomy_target_angle),
@@ -83,7 +101,7 @@ class ManifoldFeatures:
         }
 
 
-_SCAN_CACHE: Dict[Tuple[object, int, Optional[int]], ManifoldFeatures] = {}
+_SCAN_CACHE: Dict[Tuple[object, ...], ManifoldFeatures] = {}
 
 # "A moderate triangle" for the reference measurement: about 8 world units of
 # radius, but never more than 15% of the parameter domain.
@@ -106,6 +124,24 @@ HOLONOMY_MIN_FLUX = 0.05
 PARABOLIC_MIN_SIGN_RATIO = 0.02
 PARABOLIC_MIN_TOLERANCE = 5e-6
 PARABOLIC_MAX_TOLERANCE = 0.004
+
+# Task 26: triangle target tightness and the local precheck search.  The
+# fractions are relative to the strongest reachable sampling triangle, not to
+# an abstract curvature bound, so a target remains physically meaningful.
+TRIANGLE_DIFFICULTY_FRACTIONS = {
+    "easy": 0.55,
+    "medium": 0.82,
+    "hard": 0.92,
+}
+TRIANGLE_FEASIBILITY_FACTORS = (1.0, 1.50, 2.0)
+TRIANGLE_FEASIBILITY_OFFSETS = (0.0, math.pi / 6.0)
+
+
+class TriangleFeasibilityReport(dict):
+    """Boolean-compatible report returned by the local feasibility precheck."""
+
+    def __bool__(self) -> bool:
+        return bool(self.get("feasible", False))
 
 
 def _is_periodic(manifold) -> bool:
@@ -150,8 +186,20 @@ def _tangent_angle_sum(manifold, vertices) -> float:
     )
 
 
-def _reference_triangle(manifold, peak: Tuple[float, float], base_radius: float):
-    """Best reachable triangle around the positive peak (largest excess)."""
+def _reference_triangle(
+    manifold,
+    center: Tuple[float, float],
+    base_radius: float,
+    *,
+    mode: str = "excess",
+):
+    """Best reachable triangle around a curvature extreme.
+
+    ``mode="excess"`` maximises the angle excess around a positive peak;
+    ``mode="deficit"`` minimises the angle sum around a negative saddle.
+    """
+    if mode not in ("excess", "deficit"):
+        raise ValueError("mode must be 'excess' or 'deficit'")
     best = None
     angles = (
         math.pi / 2.0,
@@ -161,20 +209,170 @@ def _reference_triangle(manifold, peak: Tuple[float, float], base_radius: float)
     for factor in (1.0, 1.5, 2.0):
         radius = base_radius * factor
         vertices = [
-            _wrap_or_clamp(manifold, peak[0] + radius * math.cos(angle), peak[1] + radius * math.sin(angle))
+            _wrap_or_clamp(
+                manifold,
+                center[0] + radius * math.cos(angle),
+                center[1] + radius * math.sin(angle),
+            )
             for angle in angles
         ]
         try:
             total = _tangent_angle_sum(manifold, vertices)
-        except ValueError:
+        except (ValueError, FloatingPointError, np.linalg.LinAlgError):
             continue
         excess = total - math.pi
-        if best is None or excess > best[0]:
+        better = (
+            best is None
+            or (mode == "excess" and excess > best[0])
+            or (mode == "deficit" and excess < best[0])
+        )
+        if better:
             best = (excess, total, radius)
     if best is None:
         return 0.0, 0.0, base_radius
     excess, total, radius = best
     return float(excess), float(total), float(radius)
+
+
+def _extreme_center(manifold, mode: str, samples: int = 17) -> Tuple[float, float]:
+    """Locate the sampled positive peak or negative saddle without exposing it."""
+    if mode not in ("excess", "deficit"):
+        raise ValueError("mode must be 'excess' or 'deficit'")
+    domain = manifold.domain
+    periodic = _is_periodic(manifold)
+    xs, ys, _dx, _dy = _sample_axes(domain, max(5, int(samples)), periodic)
+    best_center = (float(xs[0]), float(ys[0]))
+    best_value = -float("inf") if mode == "excess" else float("inf")
+    for v in ys:
+        for u in xs:
+            curvature = float(manifold.gaussian_curvature(float(u), float(v)))
+            better = (
+                (mode == "excess" and curvature > best_value)
+                or (mode == "deficit" and curvature < best_value)
+            )
+            if better:
+                best_value = curvature
+                best_center = (float(u), float(v))
+    return best_center
+
+
+def _base_reference_radius(manifold, center: Tuple[float, float]) -> float:
+    domain = manifold.domain
+    e, _f, g = manifold.first_fundamental_form(float(center[0]), float(center[1]))
+    metric_scale = max(1e-9, 0.5 * (math.sqrt(float(e)) + math.sqrt(float(g))))
+    min_side = min(domain.width, domain.height)
+    return float(
+        min(
+            max(
+                REFERENCE_RADIUS_WORLD / metric_scale,
+                REFERENCE_RADIUS_MIN_FRACTION * min_side,
+            ),
+            REFERENCE_RADIUS_MAX_FRACTION * min_side,
+        )
+    )
+
+
+def verify_triangle_feasibility(
+    manifold,
+    mode: str,
+    target_sum: float,
+    difficulty: str = "easy",
+    *,
+    center: Optional[Tuple[float, float]] = None,
+    blocked=None,
+    samples: int = 17,
+) -> Dict[str, object]:
+    """Run a lightweight local triangle search before dispatching a target.
+
+    The search tries several radii and angular offsets around the positive peak
+    or negative saddle and optionally rejects candidate vertices through the
+    supplied ``blocked(u, v)`` callback.  If the requested target is not
+    reachable in this local neighbourhood, the returned adjusted target is
+    pulled back to the chosen difficulty fraction of the best sampled triangle.
+    """
+    normalized_mode = str(mode).strip().lower()
+    normalized_difficulty = str(difficulty).strip().lower()
+    if normalized_mode not in ("excess", "deficit"):
+        raise ValueError("mode must be 'excess' or 'deficit'")
+    if normalized_difficulty not in TRIANGLE_DIFFICULTY_FRACTIONS:
+        raise ValueError("difficulty must be one of easy/medium/hard")
+    target = float(target_sum)
+    if not math.isfinite(target):
+        raise ValueError("target_sum must be finite")
+
+    search_center = _extreme_center(manifold, normalized_mode, samples) if center is None else (float(center[0]), float(center[1]))
+    base_radius = _base_reference_radius(manifold, search_center)
+    angles = (
+        math.pi / 2.0,
+        math.pi / 2.0 + 2.0 * math.pi / 3.0,
+        math.pi / 2.0 + 4.0 * math.pi / 3.0,
+    )
+    best_total = None
+    attempts = 0
+    for factor in TRIANGLE_FEASIBILITY_FACTORS:
+        radius = base_radius * factor
+        for offset in TRIANGLE_FEASIBILITY_OFFSETS:
+            vertices = [
+                _wrap_or_clamp(
+                    manifold,
+                    search_center[0] + radius * math.cos(angle + offset),
+                    search_center[1] + radius * math.sin(angle + offset),
+                )
+                for angle in angles
+            ]
+            if blocked is not None and any(bool(blocked(u, v)) for u, v in vertices):
+                continue
+            try:
+                total = _tangent_angle_sum(manifold, vertices)
+            except (ValueError, FloatingPointError, np.linalg.LinAlgError):
+                continue
+            attempts += 1
+            if best_total is None:
+                best_total = total
+            elif normalized_mode == "excess" and total > best_total:
+                best_total = total
+            elif normalized_mode == "deficit" and total < best_total:
+                best_total = total
+
+    if best_total is None:
+        return TriangleFeasibilityReport({
+            "feasible": False,
+            "mode": normalized_mode,
+            "difficulty": normalized_difficulty,
+            "target_sum": float(target),
+            "adjusted_target_sum": float(target),
+            "best_sum": math.pi,
+            "best_excess": 0.0,
+            "attempts": 0,
+            "adjusted": False,
+            "center": [float(search_center[0]), float(search_center[1])],
+        })
+
+    best = float(best_total)
+    feasible = best >= target if normalized_mode == "excess" else best <= target
+    extreme = max(0.0, best - math.pi) if normalized_mode == "excess" else max(0.0, math.pi - best)
+    adjusted = False
+    adjusted_target = float(target)
+    if not feasible:
+        fraction = TRIANGLE_DIFFICULTY_FRACTIONS[normalized_difficulty]
+        if normalized_mode == "excess":
+            adjusted_target = math.pi + max(1e-6, fraction * extreme)
+        else:
+            adjusted_target = math.pi - max(1e-6, fraction * extreme)
+        adjusted = True
+        feasible = extreme > 1e-9
+    return TriangleFeasibilityReport({
+        "feasible": bool(feasible),
+        "mode": normalized_mode,
+        "difficulty": normalized_difficulty,
+        "target_sum": float(target),
+        "adjusted_target_sum": float(adjusted_target),
+        "best_sum": best,
+        "best_excess": float(best - math.pi),
+        "attempts": int(attempts),
+        "adjusted": bool(adjusted),
+        "center": [float(search_center[0]), float(search_center[1])],
+    })
 
 
 def metric_length(surface, start, end, samples: int = 24) -> float:
@@ -203,11 +401,15 @@ def scan_manifold(
     samples: int = 31,
     *,
     genus_hint: Optional[int] = None,
+    blocked=None,
+    blocked_key=None,
 ) -> ManifoldFeatures:
     """Coarsely scan ``manifold`` and cache its geometric extremes."""
     if samples < 5:
         raise ValueError("samples must be >= 5 for a meaningful scan")
     key = (getattr(manifold, "cache_key", None) or id(manifold), int(samples), genus_hint)
+    if blocked is not None:
+        key = key + (blocked_key if blocked_key is not None else id(blocked),)
     cached = _SCAN_CACHE.get(key)
     if cached is not None:
         return cached
@@ -240,6 +442,8 @@ def scan_manifold(
 
     peak_index = np.unravel_index(int(np.argmax(curvatures)), curvatures.shape)
     peak = (float(xs[peak_index[1]]), float(ys[peak_index[0]]))
+    saddle_index = np.unravel_index(int(np.argmin(curvatures)), curvatures.shape)
+    saddle = (float(xs[saddle_index[1]]), float(ys[saddle_index[0]]))
 
     if periodic:
         euler_characteristic = float(total_curvature / (2.0 * math.pi))
@@ -261,7 +465,62 @@ def scan_manifold(
         max(REFERENCE_RADIUS_WORLD / metric_scale, REFERENCE_RADIUS_MIN_FRACTION * min_side),
         REFERENCE_RADIUS_MAX_FRACTION * min_side,
     )
-    excess, angle_sum, radius = _reference_triangle(manifold, peak, base_radius)
+    excess, angle_sum, radius = _reference_triangle(manifold, peak, base_radius, mode="excess")
+    saddle_radius = _base_reference_radius(manifold, saddle)
+    deficit_excess, deficit_angle_sum, deficit_radius = _reference_triangle(
+        manifold,
+        saddle,
+        saddle_radius,
+        mode="deficit",
+    )
+    reference_deficit = max(0.0, -float(deficit_excess))
+
+    # Task 26: precheck both directions and materialise a target for every
+    # difficulty.  A failed local target is pulled back to a point that the
+    # precheck itself certifies as reachable.
+    excess_limit = max(0.0, float(excess))
+    medium_excess_target = math.pi + TRIANGLE_DIFFICULTY_FRACTIONS["medium"] * excess_limit
+    excess_check = verify_triangle_feasibility(
+        manifold,
+        "excess",
+        medium_excess_target,
+        "medium",
+        center=peak,
+        blocked=blocked,
+    )
+    excess_extreme = (
+        max(0.0, float(excess_check["best_sum"]) - math.pi)
+        if int(excess_check["attempts"]) > 0
+        else 0.0
+    )
+    if blocked is None:
+        excess_extreme = excess_limit
+    else:
+        excess_extreme = min(excess_limit, excess_extreme)
+
+    medium_deficit_target = math.pi - TRIANGLE_DIFFICULTY_FRACTIONS["medium"] * reference_deficit
+    deficit_check = verify_triangle_feasibility(
+        manifold,
+        "deficit",
+        medium_deficit_target,
+        "medium",
+        center=saddle,
+        blocked=blocked,
+    )
+    deficit_extreme = (
+        max(0.0, math.pi - float(deficit_check["best_sum"]))
+        if int(deficit_check["attempts"]) > 0
+        else 0.0
+    )
+    if blocked is None:
+        deficit_extreme = reference_deficit
+    else:
+        deficit_extreme = min(reference_deficit, deficit_extreme)
+
+    triangle_targets: Dict[str, float] = {}
+    for difficulty, fraction in TRIANGLE_DIFFICULTY_FRACTIONS.items():
+        triangle_targets[f"excess_target_{difficulty}"] = math.pi + fraction * excess_extreme
+        triangle_targets[f"deficit_target_{difficulty}"] = math.pi - fraction * deficit_extreme
 
     # Task 20: Bertrand-Diquet-Puisseux ring reference.
     # Adapt the ring radius so the BDP expansion stays in its perturbative
@@ -354,6 +613,16 @@ def scan_manifold(
         parabolic_tolerance=float(parabolic_tolerance),
         parabolic_min_distance=float(parabolic_min_distance),
         homotopy_capture_radius=float(homotopy_capture_radius),
+        saddle=saddle,
+        reference_deficit=float(reference_deficit),
+        reference_deficit_angle_sum=float(deficit_angle_sum),
+        reference_deficit_radius=float(deficit_radius),
+        excess_target_easy=float(triangle_targets["excess_target_easy"]),
+        excess_target_medium=float(triangle_targets["excess_target_medium"]),
+        excess_target_hard=float(triangle_targets["excess_target_hard"]),
+        deficit_target_easy=float(triangle_targets["deficit_target_easy"]),
+        deficit_target_medium=float(triangle_targets["deficit_target_medium"]),
+        deficit_target_hard=float(triangle_targets["deficit_target_hard"]),
     )
     _SCAN_CACHE[key] = features
     return features

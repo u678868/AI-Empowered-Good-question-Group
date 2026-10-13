@@ -28,7 +28,11 @@ from src.the_curved_world.gameplay import ExplorationGame, GameError, GameplayCo
 from src.the_curved_world.observations import ObservationConfig
 from src.the_curved_world.quest import HolonomyMeasurement, ParabolicMeasurement, QuestManager, RingMeasurement
 from src.the_curved_world.ropes import RopeNode
-from src.the_curved_world.differential import parallel_transport_polyline, principal_curvatures
+from src.the_curved_world.differential import (
+    asymptotic_direction,
+    parallel_transport_polyline,
+    principal_curvatures,
+)
 from src.the_curved_world.manifold import wrap_parameter
 from src.the_curved_world.scanner import metric_length, scan_manifold
 from src.the_curved_world.world import WorldGenerator
@@ -191,8 +195,24 @@ class GameSession:
             genus_hint = MapRegistry.get(self.map_id).genus
         except MapNotFound:
             genus_hint = None
-        features = scan_manifold(world.surface, samples=31, genus_hint=genus_hint)
-        quest_manager = QuestManager(features, seed=int(world.seed))
+        obstacles = getattr(world, "obstacles", None)
+        blocked = (
+            lambda u, v: bool(obstacles.check_collision(float(u), float(v), 0.0))
+            if obstacles is not None
+            else False
+        )
+        features = scan_manifold(
+            world.surface,
+            samples=31,
+            genus_hint=genus_hint,
+            blocked=blocked,
+            blocked_key=(int(world.seed), float(self.scale_factor)),
+        )
+        quest_manager = QuestManager(
+            features,
+            seed=int(world.seed),
+            difficulty=self.difficulty,
+        )
         self._holonomy_start_label = None
         self._holonomy_vector = (1.0, 0.0)
         self._holonomy_calibrated = False
@@ -246,7 +266,7 @@ class GameSession:
             # placeholder. Both return a neutral reading with no distance cue.
             return {
                 "signal": 0.0,
-                "label": "Offline" if self.difficulty == "medium" else "Reserved",
+                "label": "Offline",
                 "trend": "same",
             }
         if self._game.detector_locked:
@@ -260,12 +280,16 @@ class GameSession:
         }
 
     def _scoring_payload(self) -> Dict[str, Any]:
-        """Task 17: reserved scoring inputs; score itself is 0 until a formula lands."""
+        """Task 27: complete score ledger and scholar rank for the player payload."""
+        score_payload = self._game.calculate_score()
         return {
             "scale_factor": _round(self.scale_factor),
             "difficulty": self.difficulty,
-            "difficulty_reserved": self.difficulty == "hard",
-            "score": _round(self._game.score),
+            "difficulty_reserved": False,
+            "difficulty_active": self.difficulty == "hard",
+            "score": int(score_payload["total_score"]),
+            "rank": score_payload["rank"],
+            "score_breakdown": score_payload,
             "effective_steps": _round(self._game.effective_steps),
             "tool_usages": {key: int(value) for key, value in self._game.tool_usages.items()},
         }
@@ -413,6 +437,7 @@ class GameSession:
         surface = game.player_view.surface
         curvatures = tuple(float(surface.gaussian_curvature(*point)) for point in points)
         principal = tuple(principal_curvatures(surface, *point) for point in points)
+        asymptotic = tuple(asymptotic_direction(surface, *point) for point in points)
         distances = []
         for i in range(3):
             for j in range(i + 1, 3):
@@ -421,6 +446,7 @@ class GameSession:
             labels=tuple(marker.name for marker in markers),
             curvatures=curvatures,
             principal_curvatures=principal,
+            asymptotic_directions=asymptotic,
             pairwise_distances=tuple(distances),
         )
         completion = game.evaluate_parabolic_measurement(measurement)
@@ -432,6 +458,14 @@ class GameSession:
             "labels": [marker.name for marker in markers],
             "curvatures": [_round(value, 10) for value in curvatures],
             "principal_curvatures": [[_round(a, 8), _round(b, 8)] for a, b in principal],
+            "asymptotic_directions": [
+                [_round(direction[0], 8), _round(direction[1], 8)]
+                for direction in asymptotic
+            ],
+            "asymptotic_direction": [
+                _round(asymptotic[0][0], 8),
+                _round(asymptotic[0][1], 8),
+            ] if asymptotic else [0.0, 0.0],
             "pairwise_distances": [_round(value) for value in distances],
             "tolerance": _round(float(manager.features.parabolic_tolerance), 10) if manager is not None else 0.0,
             "min_distance": _round(float(manager.features.parabolic_min_distance)) if manager is not None else 0.0,
@@ -544,6 +578,12 @@ class GameSession:
             "right_3d": [_round(v) for v in game.frame()["right"]],
             "up_3d": [_round(v) for v in game.frame()["up"]],
             "elapsed_time": _round(game.elapsed_time),
+            "max_markers_allowed": int(game.max_markers_allowed),
+            "marker_count": len(game.markers),
+            "time_limit": None if game.quest_time_limit is None else _round(game.quest_time_limit),
+            "time_remaining": None if game.quest_time_remaining is None else _round(game.quest_time_remaining),
+            "is_time_expired": bool(game.is_time_expired),
+            "defeated": bool(game.defeated),
             "won": bool(game.won),
             "detector_locked": bool(game.detector_locked),
             "quest": game.quest_state(),
@@ -674,6 +714,10 @@ class GameSession:
             "obstacles": self._visible_obstacles(patch, result.position),
             "detector_locked": bool(self._game.detector_locked),
             "quest": self._game.quest_state(),
+            "time_limit": None if self._game.quest_time_limit is None else _round(self._game.quest_time_limit),
+            "time_remaining": None if self._game.quest_time_remaining is None else _round(self._game.quest_time_remaining),
+            "is_time_expired": bool(self._game.is_time_expired),
+            "defeated": bool(self._game.defeated),
             **self._game.rope_state(),
             **self._scoring_payload(),
             **self._observation_payload(),
@@ -1085,7 +1129,7 @@ class GameSession:
                     "ok": True,
                     "tool": "scan",
                     "signal": 0.0,
-                    "label": "Offline" if self.difficulty == "medium" else "Reserved",
+                    "label": "Offline",
                     "trend": "same",
                     "readings": len(game.log),
                 }
